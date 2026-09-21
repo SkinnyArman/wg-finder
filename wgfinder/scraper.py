@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
+from html import unescape as _unescape
+
 from bs4 import BeautifulSoup
 
 log = logging.getLogger("scraper")
@@ -163,9 +165,104 @@ def _genuinely_empty(html: str) -> bool:
     return sum(m in html for m in scaffolding) >= 2
 
 
+# ================= fast path =================
+# Building a full DOM for a 344 KB listing page costs ~54 ms of CPU just to
+# read ten small fields per card. Targeted regexes do the same job ~20x
+# cheaper. BeautifulSoup stays as a fallback: if the markup shifts and the
+# regexes find nothing, we fall back rather than silently returning no ads.
+
+_CARD_SPLIT = re.compile(r"<div\s+id=\"liste-details-ad-\d+\"")
+_RX = {
+    "id":    re.compile(r'data-id="(\d+)"'),
+    "url":   re.compile(r'href="(/[a-z-]*wg-zimmer[^"]+\.html)"'),
+    "title": re.compile(r'title="Anzeige ansehen:\s*([^"]*)"'),
+    "rent":  re.compile(r"(\d[\d.]*)\s*(?:\u20ac|&euro;)"),
+    "size":  re.compile(r"(\d+)\s*m(?:\u00b2|&sup2;)"),
+    "wg":    re.compile(r'title="(\d+)er WG \((\d+)w,(\d+)m,(\d+)d,(\d+)n\)"'),
+    "img":   re.compile(r'src="(https://img\.wg-gesucht\.de/[^"]+)"'),
+    "seek":  re.compile(r"/img/wg(eg|wg|mg)\.gif"),
+    "loc":   re.compile(r'<div class="col-xs-11[^"]*">\s*<span\s*>(.*?)</span>', re.S),
+}
+_TAGS = re.compile(r"<[^>]+>")
+_WS = re.compile(r"\s+")
+_SEEK = {"eg": "any", "wg": "female", "mg": "male"}
+
+
+def _one(rx: re.Pattern, blk: str, grp: int = 1, default: str = "") -> str:
+    m = rx.search(blk)
+    return m.group(grp) if m else default
+
+
+def _fast_listing(html: str) -> list[Ad]:
+    ads: list[Ad] = []
+    for blk in _CARD_SPLIT.split(html)[1:]:
+        blk = blk[:9000]                 # a card never runs longer than this
+        ad_id = _one(_RX["id"], blk)
+        if not ad_id:
+            continue
+        href = _one(_RX["url"], blk)
+        if not href:
+            continue
+
+        wg = _RX["wg"].search(blk)
+        rent = _one(_RX["rent"], blk)
+        size = _one(_RX["size"], blk)
+
+        district = ""
+        loc = _RX["loc"].search(blk)
+        if loc:
+            parts = [x.strip() for x in
+                     _WS.sub(" ", _TAGS.sub(" ", loc.group(1))).split("|")]
+            parts = [x for x in parts if x]
+            district = " \u00b7 ".join(parts[1:3])
+
+        img = _one(_RX["img"], blk)
+        if "placeholder" in img or "dummy" in img:
+            img = ""
+
+        ads.append(Ad(
+            ad_id=ad_id,
+            url=href if href.startswith("http") else f"{BASE}/{href.lstrip('/')}",
+            title=_unescape(_one(_RX["title"], blk)),
+            rent=f"{rent} \u20ac" if rent else "",
+            size=f"{size} m\u00b2" if size else "",
+            district=district,
+            image=re.sub(r"\.(small|thumb)\.", ".sized.", img) if img else "",
+            seeking=_SEEK.get(_one(_RX["seek"], blk), ""),
+            wg_size=int(wg.group(1)) if wg else 0,
+            women=int(wg.group(2)) if wg else 0,
+            men=int(wg.group(3)) if wg else 0,
+            diverse=int(wg.group(4)) if wg else 0,
+        ))
+    return ads
+
+
+_DESC = re.compile(r'<div id="ad_description_text">(.*?)</div>\s*</div>', re.S)
+_SCRIPTY = re.compile(r"<(script|style)\b.*?</\1>", re.S | re.I)
+
+
+def _fast_ad_text(html: str) -> str:
+    m = _DESC.search(html)
+    if not m:
+        return ""
+    body = _SCRIPTY.sub(" ", m.group(1))
+    body = re.sub(r"<br\s*/?>|</p>|</div>", "\n", body, flags=re.I)
+    text = _unescape(_TAGS.sub("", body))
+    lines = [ln.strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln).strip()
+
+
 # ================= HTML parsing (kept pure so it's testable) =================
 
 def parse_listing(html: str) -> list[Ad]:
+    ads = _fast_listing(html)
+    if ads:
+        return ads
+    log.debug("regex listing parse found nothing; falling back to BeautifulSoup")
+    return _bs_listing(html)
+
+
+def _bs_listing(html: str) -> list[Ad]:
     soup = BeautifulSoup(html, "html.parser")
     ads: list[Ad] = []
     seen: set[str] = set()
@@ -267,6 +364,13 @@ def parse_listing(html: str) -> list[Ad]:
 
 
 def parse_ad_text(html: str) -> str:
+    text = _fast_ad_text(html)
+    if text:
+        return text
+    return _bs_ad_text(html)
+
+
+def _bs_ad_text(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     chunks: list[str] = []
     for sel in ("#ad_description_text", "div.freitext", "#freitext_0",

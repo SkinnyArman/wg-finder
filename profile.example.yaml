@@ -1,0 +1,109 @@
+# ============================================================
+#  WG application profile  —  copy to profile.yaml and fill in
+#
+#  Facts are in three tiers. The AI is told to treat them differently:
+#    always      -> must appear in every message
+#    if_relevant -> include only if the ad gives off a vibe where it helps
+#    contextual  -> include ONLY if the ad mentions/asks for it, or it
+#                   clearly strengthens the reply
+#  Tiering is what stops every message reading the same.
+# ============================================================
+
+about:
+  name: "Your name"
+  age: 25
+  pronouns: "he/him   # or she/her, they/them"
+
+  always:
+    - "his name is X, he is 25"
+    - "non-smoker, no pets"
+    - "will be a student at <university>"
+    - "fluent in English; German around B1/B2 and actively improving"
+    - "describe your temperament as BEHAVIOUR, not adjectives -
+       e.g. quiet on weeknights, happy to sit in the kitchen and talk"
+    - "respects house rules and gives people their space"
+    - "arriving around <date> (see move_in_rule)"
+
+  if_relevant:
+    - fact: "loves cats"
+      when: "the ad mentions a cat or pet, or sounds animal-friendly"
+    - fact: "worked as a <job> before starting the master's"
+      when: "the ad is aimed at working people or asks what you do"
+
+  contextual:
+    - fact: "board games, favourite is <game>"
+      when: "the ad mentions games or a playful shared-hobby vibe"
+    - fact: "into music - <artists>"
+      when: "the ad mentions music, instruments or concerts"
+
+  # Hard rules the AI must never break
+  never:
+    - "Never mention <anything you don't want in a cold intro>.
+       Say 'back home' instead if it comes up."
+    - "Never claim a German level above <your real level>."
+    - "Never invent facts, jobs, budgets or references."
+    - "Never use emojis."
+    - "Never use generic filler like 'I am a clean, friendly and tidy person'."
+
+  move_in_rule: >
+    You arrive around <your date>. Read the ad for when the room
+    is actually free. If the room is free EARLIER than mid-October, say you can
+    take it from the earlier date / start of the tenancy. If the room is free
+    LATER, use the ad's date. Only fall back to your own date when the ad gives none. Never propose a date before the room is available.
+
+# ============================================================
+#  STYLE
+# ============================================================
+style:
+  length: "140-200 words"
+  tone: >
+    Friendly, warm and relaxed - he is writing to people he would like to live
+    with, not to a landlord or an employer. Contractions throughout. Vary the
+    sentence lengths. It should sound like a person who is easy to be around,
+    not like someone submitting an application. Still polite, not sloppy.
+  always_include:
+    - "offer a video call to say hi properly (or an in-person visit if they prefer)"
+  never_include:
+    - "emojis"
+    - "bullet points"
+    - "more than one exclamation mark in the whole message"
+  sign_off: "Your name"
+
+# ============================================================
+#  SEARCHES — Cottbus + easily commutable towns.
+#  IDs verified against wg-gesucht's sitemap on 2026-09-21.
+#  To add a town: search it on the site, copy the URL from the address bar.
+# ============================================================
+searches:
+  - name: "Cottbus"
+    url: "https://www.wg-gesucht.de/wg-zimmer-in-Cottbus.22.0.1.0.html"
+  - name: "Senftenberg (BTU 2nd campus, ~26-33 min by train)"
+    url: "https://www.wg-gesucht.de/wg-zimmer-in-Senftenberg.473.0.1.0.html"
+  - name: "Forst (Lausitz) (~18-20 min, RB46)"
+    url: "https://www.wg-gesucht.de/wg-zimmer-in-Forst.6227.0.1.0.html"
+  - name: "Vetschau (~10-15 min, fastest of the lot)"
+    url: "https://www.wg-gesucht.de/wg-zimmer-in-Vetschau.9295.0.1.0.html"
+  - name: "Drebkau (~12-15 min; rail-replacement buses on this stretch autumn 2026)"
+    url: "https://www.wg-gesucht.de/wg-zimmer-in-Drebkau.9423.0.1.0.html"
+  - name: "Lauchhammer (~47-62 min - the only awkward one)"
+    url: "https://www.wg-gesucht.de/wg-zimmer-in-Lauchhammer.9282.0.1.0.html"
+
+# ============================================================
+#  FILTERS — applied before any OpenAI call is made
+# ============================================================
+filters:
+  # ~30% of Cottbus ads specifically want a woman - skipped before any API call
+  skip_female_only: true
+  max_rent: 600
+  min_rent: 0
+  skip_if_title_contains:
+    - "nur frauen"
+    - "only women"
+    - "frauen-wg"
+    - "nur für frauen"
+    - "women only"
+    # commercial agency spam
+    - "urbanelite"
+    - "no deposit"
+    - "keine kaution"
+  require_title_contains: []

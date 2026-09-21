@@ -1,0 +1,16 @@
+[Unit]
+Description=WG-Gesucht watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/wg-finder
+EnvironmentFile=/home/ubuntu/wg-finder/.env
+ExecStart=/home/ubuntu/wg-finder/venv/bin/python -m wgfinder.bot
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

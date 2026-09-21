@@ -72,7 +72,9 @@ to catch new posts. To add one, search it on the site and copy the URL.
 | Command | What it does |
 |---|---|
 | `/more [n]` | Send n more now, ignoring the hourly cap (default 5) |
-| `/filters` | Show the filters, with buttons to change them |
+| `/settings` | Check interval, ads per hour, captcha pause |
+| `/settings poll_minutes 30` | Set one directly |
+| `/filters` | Show the ad filters, with buttons to change them |
 | `/filters max_rent 750` | Set one directly |
 | `/scan` | Check for new ads right now |
 | `/stats` | What it has seen so far |
@@ -81,7 +83,11 @@ to catch new posts. To add one, search it on the site and copy the URL.
 Per ad: **Approve** (hands you the text to paste), **Rewrite** (different
 angle, costs one more API call), **Skip** (never shown again).
 
-By default it sends at most **2 ads per hour** so it doesn't flood you.
+Timing lives in `/settings`, not in `.env` — change the check interval from
+Telegram and the schedule updates immediately, no restart. Defaults are in the
+`behaviour:` block of `profile.yaml`.
+
+By default it checks every **15 minutes** and sends at most **2 ads per hour**.
 Queued ads cost nothing — no API call happens until an ad is actually sent.
 
 Filter changes from Telegram are saved to `filters.local.json`, which

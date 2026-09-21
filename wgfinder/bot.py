@@ -31,9 +31,7 @@ log = logging.getLogger("bot")
 
 CFG = yaml.safe_load((ROOT / "profile.yaml").read_text(encoding="utf-8"))
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-POLL_MINUTES = float(os.getenv("POLL_MINUTES", "15"))
-MAX_PER_HOUR = int(os.getenv("MAX_PER_HOUR", "2"))
-BLOCK_BACKOFF_MIN = int(os.getenv("BLOCK_BACKOFF_MIN", "45"))
+SCAN_JOB = "scan"
 _burst = 0          # extra ads unlocked by /more, consumed by the next scan
 _blocked_until = 0.0   # unix ts; set when wg-gesucht shows its captcha
 _tick = 0
@@ -168,13 +166,14 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
         try:
             await _scan_once(app)
         except Blocked as e:
-            _blocked_until = time.time() + BLOCK_BACKOFF_MIN * 60
-            log.warning("%s Pausing %d min.", e, BLOCK_BACKOFF_MIN)
+            backoff = settings.load()['block_backoff_min']
+            _blocked_until = time.time() + backoff * 60
+            log.warning("%s Pausing %d min.", e, backoff)
             await app.bot.send_message(
                 CHAT_ID,
                 f"wg-gesucht is showing a captcha, so I can't read ads right now. "
                 f"This is rate limiting, not a crash. Pausing for "
-                f"{BLOCK_BACKOFF_MIN} minutes, then trying again on my own. "
+                f"{backoff} minutes, then trying again on my own. "
                 f"Nothing is lost - queued ads stay queued.")
         except Exception as e:
             log.exception("scan failed")
@@ -209,11 +208,12 @@ async def _scan_once(app):
                 fresh.append(ad)
 
         global _burst
-        budget = max(0, MAX_PER_HOUR - store.pushed_since(3600)) + _burst
+        max_per_hour = settings.load()['max_per_hour']
+        budget = max(0, max_per_hour - store.pushed_since(3600)) + _burst
         _burst = 0
         if len(fresh) > budget:
             log.info("%d new ad(s); sending %d (limit %d/hour). Rest stay queued.",
-                     len(fresh), budget, MAX_PER_HOUR)
+                     len(fresh), budget, max_per_hour)
         else:
             log.info("%d new ad(s) to write for", len(fresh))
         if budget == 0:
@@ -239,6 +239,27 @@ async def _scan_once(app):
 @owner_only
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
+
+    if q.data.startswith("set:"):
+        parts = q.data.split(":")
+        if parts[1] == "noop":
+            await q.answer()
+            return
+        key = parts[1]
+        cur = settings.load().get(key, 0) or 0
+        ok, msg = settings.set_value(key, cur + int(parts[2]))
+        await q.answer(msg)
+        if ok and key == "poll_minutes":
+            _reschedule(context.application)
+        try:
+            await q.edit_message_text(
+                settings.behaviour_summary()
+                + "\n\nTap to change, or: /settings poll_minutes 30"
+                + "\nAd filters are under /filters",
+                reply_markup=_settings_kb())
+        except Exception:
+            pass
+        return
 
     if q.data.startswith("flt:"):
         parts = q.data.split(":")
@@ -303,11 +324,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, _):
     await update.message.reply_text(
         f"WG watcher running.\nYour chat id: {update.effective_chat.id}\n"
-        f"Polling every ~{POLL_MINUTES:.0f} min, max {MAX_PER_HOUR} ads/hour.\n\n"
+        f"{settings.behaviour_summary()}\n\n"
         "/more [n] - send n more now, ignoring the hourly cap (default 5)\n"
         "/scan     - check for new ads right now\n"
         "/stats    - what I've seen\n"
-        "/filters  - see and change the filters\n"
+        "/filters  - see and change the ad filters\n"
+        "/settings - check interval, ads per hour, captcha pause\n"
         "/retry    - re-draft ads that errored")
 
 
@@ -330,6 +352,58 @@ def _filters_kb() -> InlineKeyboardMarkup:
                               callback_data="flt:max_rent:-50"),
          InlineKeyboardButton("(+50)", callback_data="flt:max_rent:+50")],
     ])
+
+
+def _reschedule(app) -> int:
+    """Apply the current poll interval to the running job queue."""
+    mins = settings.load()["poll_minutes"]
+    for job in app.job_queue.get_jobs_by_name(SCAN_JOB):
+        job.schedule_removal()
+    app.job_queue.run_repeating(
+        scan, interval=mins * 60, first=15, name=SCAN_JOB,
+        job_kwargs={"misfire_grace_time": 300, "jitter": 90})
+    log.info("scan scheduled every %d min", mins)
+    return mins
+
+
+def _settings_kb() -> InlineKeyboardMarkup:
+    f = settings.load()
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("-5 min", callback_data="set:poll_minutes:-5"),
+         InlineKeyboardButton(f"every {f['poll_minutes']} min", callback_data="set:noop"),
+         InlineKeyboardButton("+5 min", callback_data="set:poll_minutes:+5")],
+        [InlineKeyboardButton("-1", callback_data="set:max_per_hour:-1"),
+         InlineKeyboardButton(f"{f['max_per_hour']} ads/hour", callback_data="set:noop"),
+         InlineKeyboardButton("+1", callback_data="set:max_per_hour:+1")],
+        [InlineKeyboardButton("-15", callback_data="set:block_backoff_min:-15"),
+         InlineKeyboardButton(f"captcha pause {f['block_backoff_min']} min",
+                              callback_data="set:noop"),
+         InlineKeyboardButton("+15", callback_data="set:block_backoff_min:+15")],
+    ])
+
+
+@owner_only
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/settings - timing; /settings poll_minutes 30 - set one."""
+    if context.args:
+        key = context.args[0]
+        val = context.args[1] if len(context.args) > 1 else None
+        if val is None:
+            await update.message.reply_text("Usage: /settings poll_minutes 30")
+            return
+        ok, msg = settings.set_value(key, val)
+        await update.message.reply_text(msg)
+        if ok and key == "poll_minutes":
+            _reschedule(context.application)
+        if ok:
+            await update.message.reply_text(settings.behaviour_summary(),
+                                            reply_markup=_settings_kb())
+        return
+    await update.message.reply_text(
+        settings.behaviour_summary()
+        + "\n\nTap to change, or: /settings poll_minutes 30"
+        + "\nAd filters are under /filters",
+        reply_markup=_settings_kb())
 
 
 @owner_only
@@ -396,12 +470,10 @@ def main():
     app.add_handler(CommandHandler("retry", cmd_retry))
     app.add_handler(CommandHandler("more", cmd_more))
     app.add_handler(CommandHandler("filters", cmd_filters))
+    app.add_handler(CommandHandler("settings", cmd_settings))
     app.add_handler(CallbackQueryHandler(on_button))
 
-    # jitter so we don't hit the site on an exact 10-minute metronome
-    app.job_queue.run_repeating(
-        scan, interval=POLL_MINUTES * 60, first=10,
-        job_kwargs={"misfire_grace_time": 300, "jitter": 90})
+    _reschedule(app)
 
     log.info("Bot up. Send /start in Telegram.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

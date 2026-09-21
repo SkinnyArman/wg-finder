@@ -16,26 +16,37 @@ OVERRIDES = ROOT / "filters.local.json"
 
 _lock = threading.Lock()
 
-# key -> (type, human label)
-EDITABLE = {
-    "max_rent":          (int,  "Max rent (EUR)"),
-    "min_rent":          (int,  "Min rent (EUR)"),
-    "skip_female_only":  (bool, "Skip women-only WGs"),
-    "skip_pendler":      (bool, "Skip Pendler / weekly-commuter rooms"),
+# key -> (type, human label, min, max)
+FILTER_KEYS = {
+    "max_rent":          (int,  "Max rent (EUR)", 0, 5000),
+    "min_rent":          (int,  "Min rent (EUR)", 0, 5000),
+    "skip_female_only":  (bool, "Skip women-only WGs", None, None),
+    "skip_pendler":      (bool, "Skip Pendler / weekly-commuter rooms", None, None),
 }
 
+BEHAVIOUR_KEYS = {
+    "poll_minutes":      (int,  "Check every (minutes)", 5, 180),
+    "max_per_hour":      (int,  "Max ads sent per hour", 1, 20),
+    "block_backoff_min": (int,  "Pause after a captcha (minutes)", 10, 360),
+}
+
+EDITABLE = {**FILTER_KEYS, **BEHAVIOUR_KEYS}
+
 DEFAULTS = {"skip_female_only": True, "skip_pendler": True,
-            "max_rent": 600, "min_rent": 0}
+            "max_rent": 600, "min_rent": 0,
+            "poll_minutes": 15, "max_per_hour": 2, "block_backoff_min": 45}
 
 
-def _yaml_filters() -> dict:
+def _yaml_defaults() -> dict:
     d = yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}
-    return (d.get("filters") or {}).copy()
+    out = (d.get("filters") or {}).copy()
+    out.update(d.get("behaviour") or {})
+    return out
 
 
 def load() -> dict:
     f = DEFAULTS.copy()
-    f.update(_yaml_filters())
+    f.update(_yaml_defaults())
     if OVERRIDES.exists():
         try:
             f.update(json.loads(OVERRIDES.read_text(encoding="utf-8")))
@@ -48,14 +59,16 @@ def set_value(key: str, raw) -> tuple[bool, str]:
     """Returns (ok, message). Only keys in EDITABLE can be changed."""
     if key not in EDITABLE:
         return False, f"'{key}' is not editable. Try: {', '.join(EDITABLE)}"
-    typ, label = EDITABLE[key]
+    typ, label, lo, hi = EDITABLE[key]
     try:
         if typ is bool:
             v = str(raw).strip().lower() in ("1", "true", "yes", "on", "an")
         else:
             v = int(str(raw).strip())
-            if v < 0:
-                return False, "Must be 0 or more."
+            if lo is not None and v < lo:
+                return False, f"{label}: minimum is {lo}."
+            if hi is not None and v > hi:
+                return False, f"{label}: maximum is {hi}."
     except (ValueError, TypeError):
         return False, f"'{raw}' is not a valid value for {label}."
 
@@ -79,6 +92,15 @@ def toggle(key: str) -> tuple[bool, str]:
 def reset() -> None:
     with _lock:
         OVERRIDES.unlink(missing_ok=True)
+
+
+def behaviour_summary() -> str:
+    f = load()
+    return "\n".join([
+        f"Check every:         {f['poll_minutes']} min",
+        f"Max ads per hour:    {f['max_per_hour']}",
+        f"Pause on captcha:    {f['block_backoff_min']} min",
+    ])
 
 
 def summary() -> str:

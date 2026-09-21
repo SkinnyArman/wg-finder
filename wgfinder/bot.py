@@ -34,7 +34,6 @@ CFG = yaml.safe_load((ROOT / "profile.yaml").read_text(encoding="utf-8"))
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 SCAN_JOB = "scan"
 _burst = 0          # extra ads unlocked by /more, consumed by the next scan
-_blocked_until = 0.0   # unix ts; set when wg-gesucht shows its captcha
 _tick = 0
 _cancel = False     # set by /pause to stop a scan already in progress
 
@@ -155,7 +154,6 @@ async def _push(app, ad, draft: dict):
 
 # ----------------------------- the scan job -----------------------------
 async def scan(context: ContextTypes.DEFAULT_TYPE):
-    global _blocked_until
     if _scan_lock.locked():
         log.info("Previous scan still running, skipping this tick.")
         return
@@ -163,9 +161,9 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
     if paused:
         log.info("Scan skipped (%s).", state)
         return
-    if time.time() < _blocked_until:
-        mins = int((_blocked_until - time.time()) / 60) + 1
-        log.info("Still backing off from wg-gesucht for ~%d min.", mins)
+    blocked, left = settings.block_state()
+    if blocked:
+        log.info("Still backing off from wg-gesucht (%s left).", left)
         return
     async with _scan_lock:
         global _cancel
@@ -175,13 +173,13 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
             await _scan_once(app)
         except Blocked as e:
             backoff = settings.load()['block_backoff_min']
-            _blocked_until = time.time() + backoff * 60
+            settings.start_block(backoff)
             log.warning("%s Pausing %d min.", e, backoff)
             await app.bot.send_message(
                 CHAT_ID,
                 f"wg-gesucht is showing a captcha, so I can't read ads right now. "
                 f"This is rate limiting, not a crash. Pausing for "
-                f"{backoff} minutes, then trying again on my own. "
+                f"{backoff} minutes, then starting again on my own. "
                 f"Nothing is lost - queued ads stay queued.")
         except Exception as e:
             log.exception("scan failed")
@@ -373,6 +371,8 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if paused:
         await update.message.reply_text(f"I'm {state}. /resume first.")
         return
+    if await _blocked_reply(update):
+        return
     await update.message.reply_text("Scanning now...")
     await scan(context)
     await update.message.reply_text("Scan done.")
@@ -390,6 +390,17 @@ def _filters_kb() -> InlineKeyboardMarkup:
                               callback_data="flt:max_rent:-50"),
          InlineKeyboardButton("(+50)", callback_data="flt:max_rent:+50")],
     ])
+
+
+async def _blocked_reply(update) -> bool:
+    """True (and tells the user) if wg-gesucht currently has us blocked."""
+    blocked, left = settings.block_state()
+    if blocked:
+        await update.message.reply_text(
+            f"wg-gesucht is still showing a captcha. {left} left on the backoff.\n\n"
+            f"Asking again now would only extend it - I'll start by myself when "
+            f"the timer runs out.")
+    return blocked
 
 
 def _parse_duration(text: str) -> int | None:
@@ -431,6 +442,9 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _cancel
     _cancel = False
     settings.resume()
+    if await _blocked_reply(update):
+        await update.message.reply_text("Un-paused, but waiting out the captcha first.")
+        return
     await update.message.reply_text("Running again. Checking now...")
     await scan(context)
     await update.message.reply_text("Done.")
@@ -524,6 +538,8 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
     paused, state = settings.pause_state()
     if paused:
         await update.message.reply_text(f"I'm {state}. /resume first.")
+        return
+    if await _blocked_reply(update):
         return
     n = max(1, min(n, 20))
     _burst = n

@@ -34,8 +34,9 @@ EDITABLE = {**FILTER_KEYS, **BEHAVIOUR_KEYS}
 
 DEFAULTS = {"skip_female_only": True, "skip_pendler": True,
             "max_rent": 600, "min_rent": 0,
-            "poll_minutes": 15, "max_per_hour": 2, "block_backoff_min": 45,
-            "paused_until": 0}   # 0 = running, -1 = paused indefinitely
+            "poll_minutes": 60, "max_per_hour": 2, "block_backoff_min": 45,
+            "paused_until": 0,    # 0 = running, -1 = paused indefinitely
+            "blocked_until": 0}   # set when wg-gesucht shows its captcha
 
 
 def _yaml_defaults() -> dict:
@@ -143,9 +144,41 @@ def pause_state() -> tuple[bool, str]:
     return True, f"paused, {mins} min left"
 
 
+def _fmt_left(seconds: int) -> str:
+    mins = seconds // 60 + 1
+    if mins >= 60:
+        return f"{mins // 60}h {mins % 60:02d}m"
+    return f"{mins} min"
+
+
+def start_block(minutes: int) -> None:
+    import time as _t
+    _write("blocked_until", int(_t.time()) + minutes * 60)
+
+
+def clear_block() -> None:
+    _write("blocked_until", 0)
+
+
+def block_state() -> tuple[bool, str]:
+    """(is_blocked, 'time left'). Survives restarts, so a restart can't
+    bypass the backoff and walk straight back into the captcha."""
+    import time as _t
+    v = int(load().get("blocked_until") or 0)
+    left = v - int(_t.time())
+    if v <= 0 or left <= 0:
+        if v:
+            clear_block()
+        return False, ""
+    return True, _fmt_left(left)
+
+
 def behaviour_summary() -> str:
     f = load()
     _, state = pause_state()
+    blocked, left = block_state()
+    if blocked:
+        state = f"{state}, captcha backoff {left} left"
     return "\n".join([
         f"Status:              {state}",
         f"Check every:         {f['poll_minutes']} min",

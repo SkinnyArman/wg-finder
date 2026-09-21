@@ -74,7 +74,7 @@ style:
 #  /settings; overrides are saved to filters.local.json.
 # ============================================================
 behaviour:
-  poll_minutes: 15        # how often to check (5-180)
+  poll_minutes: 60        # how often to check (5-180)
   max_per_hour: 2         # most ads sent to you per hour (1-20)
   block_backoff_min: 45   # pause this long if wg-gesucht shows a captcha
 

@@ -244,20 +244,30 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
   const store = new Store(env.DB);
   const profile = await profileOf(env);
 
+  const text: string = update.message?.text ?? "";
+  const isCommand = text.startsWith("/");
+
+  // Ordinary group chatter is none of our business. Only commands and button
+  // presses are even considered - otherwise the bot would answer every
+  // message anyone sends in the group.
+  if (!update.callback_query && !isCommand) return;
+
   const from = update.message?.from ?? update.callback_query?.from;
   const owner = String(env.TELEGRAM_OWNER_ID || env.TELEGRAM_CHAT_ID);
   const name = (profile.about as any)?.name ?? "its owner";
   if (!from || String(from.id) !== owner) {
     const deny = `Sorry, this bot was built for ${name}'s own flat search and only answers to them.`;
-    if (update.callback_query) await tg.answerCallback(update.callback_query.id, deny, true);
-    else if (update.message) await tg.send(deny, {}, String(update.message.chat.id));
+    if (update.callback_query) {
+      await tg.answerCallback(update.callback_query.id, deny, true);
+    } else {
+      // someone else typed a command at it - say so once, in that chat
+      await tg.send(deny, {}, String(update.message.chat.id));
+    }
     return;
   }
 
   if (update.callback_query) return handleButton(update.callback_query, env, tg, store, profile);
 
-  const text: string = update.message?.text ?? "";
-  if (!text.startsWith("/")) return;
   const chat = String(update.message.chat.id);
   const [cmdRaw, ...args] = text.trim().split(/\s+/);
   const cmd = cmdRaw.split("@")[0];

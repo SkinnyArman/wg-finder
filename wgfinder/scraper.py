@@ -16,6 +16,17 @@ from bs4 import BeautifulSoup
 
 log = logging.getLogger("scraper")
 
+
+class Blocked(Exception):
+    """wg-gesucht served its 'Überprüfung' captcha wall instead of a page."""
+
+
+def _is_captcha(html: str) -> bool:
+    low = html.lower()
+    return ("<title>überprüfung" in low
+            or "überprüfung</title>" in low
+            or ("captcha" in low and "wgg_card" not in low and "offer_list_item" not in low))
+
 BASE = "https://www.wg-gesucht.de"
 DEBUG_DIR = Path(__file__).resolve().parent.parent / "debug"
 
@@ -77,7 +88,7 @@ class Ad:
 class WGClient:
     """Polite reader: real browser headers, pauses, backoff on rate limits."""
 
-    def __init__(self, min_delay: float = 2.5, max_delay: float = 6.0):
+    def __init__(self, min_delay: float = 8.0, max_delay: float = 18.0):
         self.min_delay, self.max_delay = min_delay, max_delay
         self._c: httpx.AsyncClient | None = None
 
@@ -100,6 +111,11 @@ class WGClient:
                 log.warning("request error %s (%s)", e, url)
                 continue
             if r.status_code == 200:
+                if _is_captcha(r.text):
+                    self._dump(r.text, "captcha")
+                    raise Blocked(
+                        "wg-gesucht is showing its verification captcha. "
+                        "Too many requests - back off and try later.")
                 return r.text
             # 404 here is usually a soft rate-limit, not a dead page
             wait = 20 * (attempt + 1)
@@ -125,6 +141,7 @@ class WGClient:
         ad.meta.update(parse_ad_meta(html))
         if not ad.text:
             self._dump(html, f"no-text-{ad.ad_id}")
+            log.warning("no description extracted for %s - not drafting", ad.ad_id)
         return ad
 
     def _dump(self, html: str, tag: str):

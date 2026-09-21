@@ -2,6 +2,7 @@
 import asyncio
 import functools
 import html
+import time
 import logging
 import os
 import random
@@ -16,7 +17,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes)
 
 from . import settings, store
-from .scraper import WGClient
+from .scraper import Blocked, WGClient
 from .writer import Writer
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,9 +31,12 @@ log = logging.getLogger("bot")
 
 CFG = yaml.safe_load((ROOT / "profile.yaml").read_text(encoding="utf-8"))
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-POLL_MINUTES = float(os.getenv("POLL_MINUTES", "10"))
+POLL_MINUTES = float(os.getenv("POLL_MINUTES", "15"))
 MAX_PER_HOUR = int(os.getenv("MAX_PER_HOUR", "2"))
+BLOCK_BACKOFF_MIN = int(os.getenv("BLOCK_BACKOFF_MIN", "45"))
 _burst = 0          # extra ads unlocked by /more, consumed by the next scan
+_blocked_until = 0.0   # unix ts; set when wg-gesucht shows its captcha
+_tick = 0
 
 writer = Writer(os.environ["OPENAI_API_KEY"],
                 os.getenv("OPENAI_MODEL", "gpt-4o"), CFG)
@@ -151,13 +155,27 @@ async def _push(app, ad, draft: dict):
 
 # ----------------------------- the scan job -----------------------------
 async def scan(context: ContextTypes.DEFAULT_TYPE):
+    global _blocked_until
     if _scan_lock.locked():
         log.info("Previous scan still running, skipping this tick.")
+        return
+    if time.time() < _blocked_until:
+        mins = int((_blocked_until - time.time()) / 60) + 1
+        log.info("Still backing off from wg-gesucht for ~%d min.", mins)
         return
     async with _scan_lock:
         app = context.application
         try:
             await _scan_once(app)
+        except Blocked as e:
+            _blocked_until = time.time() + BLOCK_BACKOFF_MIN * 60
+            log.warning("%s Pausing %d min.", e, BLOCK_BACKOFF_MIN)
+            await app.bot.send_message(
+                CHAT_ID,
+                f"wg-gesucht is showing a captcha, so I can't read ads right now. "
+                f"This is rate limiting, not a crash. Pausing for "
+                f"{BLOCK_BACKOFF_MIN} minutes, then trying again on my own. "
+                f"Nothing is lost - queued ads stay queued.")
         except Exception as e:
             log.exception("scan failed")
             await app.bot.send_message(CHAT_ID, f"Scan error: {html.escape(str(e))[:300]}")
@@ -165,8 +183,17 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
 
 async def _scan_once(app):
     async with WGClient() as c:
+        global _tick
+        _tick += 1
+        searches = CFG.get("searches") or []
+        # The outlying towns get a handful of ads a month. Checking all six
+        # every 15 minutes is what tripped wg-gesucht's captcha, so the quiet
+        # ones are only checked every 4th scan (roughly hourly).
+        if _tick % 4 != 1 and len(searches) > 1:
+            searches = searches[:1]
+
         fresh = []
-        for search in CFG.get("searches") or []:
+        for search in searches:
             name = search.get("name", search["url"])
             ads = await c.fetch_listing(search["url"])
             log.info("%-45s %d ad(s)", name, len(ads))
@@ -195,6 +222,12 @@ async def _scan_once(app):
         for ad in fresh[:budget]:
             try:
                 await c.fetch_ad_text(ad)
+                if len((ad.text or "").strip()) < 80:
+                    # usually a captcha on the detail page. Drafting from an
+                    # empty ad produces a generic message, so requeue instead.
+                    log.warning("skipping %s: no usable ad text", ad.ad_id)
+                    store.note_failure(ad.ad_id, ad.url, ad.title)
+                    continue
                 draft = await writer.compose(ad)
                 await _push(app, ad, draft)
             except Exception:

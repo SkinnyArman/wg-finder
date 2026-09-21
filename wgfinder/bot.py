@@ -153,98 +153,57 @@ async def _push(app, ad, draft: dict):
 
 
 # ----------------------------- the scan job -----------------------------
-async def scan(context: ContextTypes.DEFAULT_TYPE):
+async def scan(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int]:
+    """Returns (status, ads_sent). Status is what the user needs told."""
     if _scan_lock.locked():
         log.info("Previous scan still running, skipping this tick.")
-        return
+        return "busy", 0
+
     paused, state = settings.pause_state()
     if paused:
         log.info("Scan skipped (%s).", state)
-        return
+        return "paused", 0
+
     blocked, left = settings.block_state()
     if blocked:
         log.info("Still backing off from wg-gesucht (%s left).", left)
-        return
+        return "blocked", 0
+
     async with _scan_lock:
         global _cancel
         _cancel = False
         app = context.application
         try:
-            await _scan_once(app)
-        except Blocked as e:
-            backoff = settings.load()['block_backoff_min']
+            sent = await _scan_once(app)
+            return ("cancelled" if _cancel else "ok"), sent
+        except Blocked:
+            already, _ = settings.block_state()
+            backoff = settings.load()["block_backoff_min"]
             settings.start_block(backoff)
-            log.warning("%s Pausing %d min.", e, backoff)
+            if already:
+                log.warning("captcha again; backoff extended to %d min", backoff)
+                return "blocked", 0
+            log.warning("wg-gesucht captcha. Pausing %d min.", backoff)
             await app.bot.send_message(
                 CHAT_ID,
-                f"wg-gesucht is showing a captcha, so I can't read ads right now. "
-                f"This is rate limiting, not a crash. Pausing for "
-                f"{backoff} minutes, then starting again on my own. "
-                f"Nothing is lost - queued ads stay queued.")
+                f"<b>Paused: wg-gesucht wants a captcha</b>\n\n"
+                f"This is their rate limiting, not a crash, and nothing is "
+                f"lost - every ad I hadn't got to is still queued.\n\n"
+                f"I'll wait <b>{backoff} minutes</b> and start again by myself. "
+                f"You don't need to do anything. Asking me to scan before then "
+                f"only makes it last longer.\n\n"
+                f"Check the time left with /settings.",
+                parse_mode=ParseMode.HTML)
+            return "blocked", 0
         except Exception as e:
             log.exception("scan failed")
-            await app.bot.send_message(CHAT_ID, f"Scan error: {html.escape(str(e))[:300]}")
-
-
-async def _scan_once(app):
-    async with WGClient() as c:
-        global _tick
-        _tick += 1
-        searches = CFG.get("searches") or []
-        # The outlying towns get a handful of ads a month. Checking all six
-        # every 15 minutes is what tripped wg-gesucht's captcha, so the quiet
-        # ones are only checked every 4th scan (roughly hourly).
-        if _tick % 4 != 1 and len(searches) > 1:
-            searches = searches[:1]
-
-        fresh = []
-        for search in searches:
-            if _cancel:
-                log.info("Scan cancelled by /pause.")
-                return
-            name = search.get("name", search["url"])
-            ads = await c.fetch_listing(search["url"])
-            log.info("%-45s %d ad(s)", name, len(ads))
-            for ad in ads:
-                if store.seen(ad.ad_id):
-                    continue
-                ok, why = passes_filters(ad)
-                if not ok:
-                    log.info("  filtered %s (%s)", ad.ad_id, why)
-                    store.record(ad.ad_id, url=ad.url, title=ad.title,
-                                 rent=ad.rent, status="filtered")
-                    continue
-                fresh.append(ad)
-
-        global _burst
-        max_per_hour = settings.load()['max_per_hour']
-        budget = max(0, max_per_hour - store.pushed_since(3600)) + _burst
-        _burst = 0
-        if len(fresh) > budget:
-            log.info("%d new ad(s); sending %d (limit %d/hour). Rest stay queued.",
-                     len(fresh), budget, max_per_hour)
-        else:
-            log.info("%d new ad(s) to write for", len(fresh))
-        if budget == 0:
-            return
-
-        for ad in fresh[:budget]:
-            if _cancel:
-                log.info("Scan cancelled by /pause - remaining ads stay queued.")
-                return
-            try:
-                await c.fetch_ad_text(ad)
-                if len((ad.text or "").strip()) < 80:
-                    # usually a captcha on the detail page. Drafting from an
-                    # empty ad produces a generic message, so requeue instead.
-                    log.warning("skipping %s: no usable ad text", ad.ad_id)
-                    store.note_failure(ad.ad_id, ad.url, ad.title)
-                    continue
-                draft = await writer.compose(ad)
-                await _push(app, ad, draft)
-            except Exception:
-                log.exception("ad %s failed", ad.ad_id)
-                store.note_failure(ad.ad_id, ad.url, ad.title)
+            await app.bot.send_message(
+                CHAT_ID,
+                f"Something went wrong during the scan:\n"
+                f"<code>{html.escape(str(e))[:300]}</code>\n\n"
+                f"I'll try again at the next check. Queued ads are safe.",
+                parse_mode=ParseMode.HTML)
+            return "error", 0
 
 
 # ----------------------------- handlers -----------------------------
@@ -373,9 +332,10 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if await _blocked_reply(update):
         return
-    await update.message.reply_text("Scanning now...")
-    await scan(context)
-    await update.message.reply_text("Scan done.")
+    await update.message.reply_text("Checking now...")
+    msg = _outcome(*await scan(context))
+    if msg:
+        await update.message.reply_text(msg)
 
 
 def _filters_kb() -> InlineKeyboardMarkup:
@@ -390,6 +350,23 @@ def _filters_kb() -> InlineKeyboardMarkup:
                               callback_data="flt:max_rent:-50"),
          InlineKeyboardButton("(+50)", callback_data="flt:max_rent:+50")],
     ])
+
+
+def _outcome(status: str, sent: int) -> str | None:
+    """What to tell the user after a scan. None = already told them."""
+    if status == "blocked":
+        return None                      # scan() sent the captcha notice
+    if status == "busy":
+        return "A scan was already running - let that one finish."
+    if status == "paused":
+        return "I'm paused. /resume first."
+    if status == "cancelled":
+        return "Stopped. Anything I hadn't sent is still queued."
+    if status == "error":
+        return None                      # scan() already explained
+    if sent == 0:
+        return "Nothing new - everything currently listed I've already shown you."
+    return f"Sent {sent} ad{'s' if sent != 1 else ''}."
 
 
 async def _blocked_reply(update) -> bool:
@@ -446,8 +423,9 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Un-paused, but waiting out the captcha first.")
         return
     await update.message.reply_text("Running again. Checking now...")
-    await scan(context)
-    await update.message.reply_text("Done.")
+    msg = _outcome(*await scan(context))
+    if msg:
+        await update.message.reply_text(msg)
 
 
 def _reschedule(app) -> int:
@@ -543,9 +521,16 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     n = max(1, min(n, 20))
     _burst = n
-    await update.message.reply_text(f"Unlocking {n} more. Scanning...")
-    await scan(context)
-    await update.message.reply_text("Done.")
+    await update.message.reply_text(f"Unlocking {n} more. Checking...")
+    status, sent = await scan(context)
+    if status == "ok" and sent == 0:
+        await update.message.reply_text(
+            "Nothing new to send - everything listed right now you've "
+            "already seen. I'll keep watching.")
+    else:
+        msg = _outcome(status, sent)
+        if msg:
+            await update.message.reply_text(msg)
 
 
 @owner_only

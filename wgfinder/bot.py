@@ -2,6 +2,7 @@
 import asyncio
 import functools
 import html
+import re
 import time
 import logging
 import os
@@ -35,6 +36,7 @@ SCAN_JOB = "scan"
 _burst = 0          # extra ads unlocked by /more, consumed by the next scan
 _blocked_until = 0.0   # unix ts; set when wg-gesucht shows its captcha
 _tick = 0
+_cancel = False     # set by /pause to stop a scan already in progress
 
 writer = Writer(os.environ["OPENAI_API_KEY"],
                 os.getenv("OPENAI_MODEL", "gpt-4o"), CFG)
@@ -157,11 +159,17 @@ async def scan(context: ContextTypes.DEFAULT_TYPE):
     if _scan_lock.locked():
         log.info("Previous scan still running, skipping this tick.")
         return
+    paused, state = settings.pause_state()
+    if paused:
+        log.info("Scan skipped (%s).", state)
+        return
     if time.time() < _blocked_until:
         mins = int((_blocked_until - time.time()) / 60) + 1
         log.info("Still backing off from wg-gesucht for ~%d min.", mins)
         return
     async with _scan_lock:
+        global _cancel
+        _cancel = False
         app = context.application
         try:
             await _scan_once(app)
@@ -193,6 +201,9 @@ async def _scan_once(app):
 
         fresh = []
         for search in searches:
+            if _cancel:
+                log.info("Scan cancelled by /pause.")
+                return
             name = search.get("name", search["url"])
             ads = await c.fetch_listing(search["url"])
             log.info("%-45s %d ad(s)", name, len(ads))
@@ -220,6 +231,9 @@ async def _scan_once(app):
             return
 
         for ad in fresh[:budget]:
+            if _cancel:
+                log.info("Scan cancelled by /pause - remaining ads stay queued.")
+                return
             try:
                 await c.fetch_ad_text(ad)
                 if len((ad.text or "").strip()) < 80:
@@ -244,6 +258,24 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = q.data.split(":")
         if parts[1] == "noop":
             await q.answer()
+            return
+        if parts[1] in ("pause", "resume"):
+            global _cancel
+            if parts[1] == "pause":
+                _cancel = True
+                await q.answer(settings.pause())
+            else:
+                _cancel = False
+                settings.resume()
+                await q.answer("Running again")
+            try:
+                await q.edit_message_text(
+                    settings.behaviour_summary()
+                    + "\n\nTap to change, or: /settings poll_minutes 30"
+                    + "\nAd filters are under /filters",
+                    reply_markup=_settings_kb())
+            except Exception:
+                pass
             return
         key = parts[1]
         cur = settings.load().get(key, 0) or 0
@@ -325,6 +357,8 @@ async def cmd_start(update: Update, _):
     await update.message.reply_text(
         f"WG watcher running.\nYour chat id: {update.effective_chat.id}\n"
         f"{settings.behaviour_summary()}\n\n"
+        "/pause [2h] - stop searching (forever, or for a while)\n"
+        "/resume   - start again\n"
         "/more [n] - send n more now, ignoring the hourly cap (default 5)\n"
         "/scan     - check for new ads right now\n"
         "/stats    - what I've seen\n"
@@ -335,6 +369,10 @@ async def cmd_start(update: Update, _):
 
 @owner_only
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    paused, state = settings.pause_state()
+    if paused:
+        await update.message.reply_text(f"I'm {state}. /resume first.")
+        return
     await update.message.reply_text("Scanning now...")
     await scan(context)
     await update.message.reply_text("Scan done.")
@@ -354,6 +392,50 @@ def _filters_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def _parse_duration(text: str) -> int | None:
+    """'30m', '2h', '90' (minutes), 'tomorrow' -> seconds. None if unparseable."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    if t in ("tomorrow", "morgen"):
+        return 12 * 3600
+    m = re.fullmatch(r"(\d+)\s*([mhd]?)", t)
+    if not m:
+        return None
+    n = int(m.group(1))
+    unit = m.group(2) or "m"
+    return n * {"m": 60, "h": 3600, "d": 86400}[unit]
+
+
+@owner_only
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/pause - stop until told otherwise. /pause 2h - stop for a while."""
+    global _cancel
+    _cancel = True          # stop a scan that is already running
+
+    secs = _parse_duration(context.args[0]) if context.args else None
+    if context.args and secs is None:
+        await update.message.reply_text(
+            "Didn't understand that. Try /pause, /pause 30m, /pause 2h, /pause 1d")
+        return
+
+    msg = settings.pause(secs)
+    busy = " Stopping the scan that was running." if _scan_lock.locked() else ""
+    await update.message.reply_text(
+        f"{msg}.{busy}\n\nNothing is lost - ads stay queued and nothing is "
+        f"sent to anyone. /resume when you want it back.")
+
+
+@owner_only
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _cancel
+    _cancel = False
+    settings.resume()
+    await update.message.reply_text("Running again. Checking now...")
+    await scan(context)
+    await update.message.reply_text("Done.")
+
+
 def _reschedule(app) -> int:
     """Apply the current poll interval to the running job queue."""
     mins = settings.load()["poll_minutes"]
@@ -368,7 +450,12 @@ def _reschedule(app) -> int:
 
 def _settings_kb() -> InlineKeyboardMarkup:
     f = settings.load()
+    paused, _ = settings.pause_state()
+    top = ([InlineKeyboardButton("Resume searching", callback_data="set:resume")]
+           if paused else
+           [InlineKeyboardButton("Pause searching", callback_data="set:pause")])
     return InlineKeyboardMarkup([
+        top,
         [InlineKeyboardButton("-5 min", callback_data="set:poll_minutes:-5"),
          InlineKeyboardButton(f"every {f['poll_minutes']} min", callback_data="set:noop"),
          InlineKeyboardButton("+5 min", callback_data="set:poll_minutes:+5")],
@@ -434,6 +521,10 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
         n = int(context.args[0]) if context.args else 5
     except (ValueError, IndexError):
         n = 5
+    paused, state = settings.pause_state()
+    if paused:
+        await update.message.reply_text(f"I'm {state}. /resume first.")
+        return
     n = max(1, min(n, 20))
     _burst = n
     await update.message.reply_text(f"Unlocking {n} more. Scanning...")
@@ -471,6 +562,8 @@ def main():
     app.add_handler(CommandHandler("more", cmd_more))
     app.add_handler(CommandHandler("filters", cmd_filters))
     app.add_handler(CommandHandler("settings", cmd_settings))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CallbackQueryHandler(on_button))
 
     _reschedule(app)

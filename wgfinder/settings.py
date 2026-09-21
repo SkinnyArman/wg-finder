@@ -34,7 +34,8 @@ EDITABLE = {**FILTER_KEYS, **BEHAVIOUR_KEYS}
 
 DEFAULTS = {"skip_female_only": True, "skip_pendler": True,
             "max_rent": 600, "min_rent": 0,
-            "poll_minutes": 15, "max_per_hour": 2, "block_backoff_min": 45}
+            "poll_minutes": 15, "max_per_hour": 2, "block_backoff_min": 45,
+            "paused_until": 0}   # 0 = running, -1 = paused indefinitely
 
 
 def _yaml_defaults() -> dict:
@@ -94,9 +95,59 @@ def reset() -> None:
         OVERRIDES.unlink(missing_ok=True)
 
 
+def _write(key, value):
+    with _lock:
+        cur = {}
+        if OVERRIDES.exists():
+            try:
+                cur = json.loads(OVERRIDES.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                cur = {}
+        cur[key] = value
+        OVERRIDES.write_text(json.dumps(cur, indent=2), encoding="utf-8")
+
+
+def pause(seconds: int | None = None) -> str:
+    """seconds=None pauses indefinitely. Returns a human description."""
+    import time as _t
+    if seconds is None:
+        _write("paused_until", -1)
+        return "Paused indefinitely"
+    until = int(_t.time()) + seconds
+    _write("paused_until", until)
+    mins = round(seconds / 60)
+    if mins >= 60:
+        return f"Paused for {mins // 60}h {mins % 60:02d}m"
+    return f"Paused for {mins} min"
+
+
+def resume() -> None:
+    _write("paused_until", 0)
+
+
+def pause_state() -> tuple[bool, str]:
+    """(is_paused, human description)."""
+    import time as _t
+    v = int(load().get("paused_until") or 0)
+    if v == 0:
+        return False, "running"
+    if v < 0:
+        return True, "paused indefinitely"
+    left = v - int(_t.time())
+    if left <= 0:
+        resume()
+        return False, "running"
+    mins = left // 60 + 1
+    if mins >= 60:
+        return True, f"paused, {mins // 60}h {mins % 60:02d}m left"
+    return True, f"paused, {mins} min left"
+
+
 def behaviour_summary() -> str:
     f = load()
+    _, state = pause_state()
     return "\n".join([
+        f"Status:              {state}",
         f"Check every:         {f['poll_minutes']} min",
         f"Max ads per hour:    {f['max_per_hour']}",
         f"Pause on captcha:    {f['block_backoff_min']} min",

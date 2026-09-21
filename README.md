@@ -71,6 +71,8 @@ to catch new posts. To add one, search it on the site and copy the URL.
 
 | Command | What it does |
 |---|---|
+| `/pause` | Stop searching. `/pause 2h` stops for a while |
+| `/resume` | Start again |
 | `/more [n]` | Send n more now, ignoring the hourly cap (default 5) |
 | `/settings` | Check interval, ads per hour, captcha pause |
 | `/settings poll_minutes 30` | Set one directly |

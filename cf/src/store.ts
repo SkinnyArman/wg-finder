@@ -97,6 +97,22 @@ export class Store {
     return r?.n ?? 0;
   }
 
+  /** Unix ts of the most recent ad we sent, or 0. */
+  async lastPushed(): Promise<number> {
+    const r = await this.db
+      .prepare("SELECT MAX(pushed_at) AS t FROM ads")
+      .first<{ t: number | null }>();
+    return r?.t ?? 0;
+  }
+
+  async countQueued(): Promise<number> {
+    const r = await this.db.prepare(
+      `SELECT COUNT(*) AS n FROM ads
+       WHERE status='queued' OR (status='error' AND attempts < ${MAX_ATTEMPTS})`)
+      .first<{ n: number }>();
+    return r?.n ?? 0;
+  }
+
   async retryFailed(): Promise<number> {
     const r = await this.db.prepare("DELETE FROM ads WHERE status='error'").run();
     return r.meta.changes ?? 0;

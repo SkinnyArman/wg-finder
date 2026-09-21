@@ -143,6 +143,40 @@ async function draftOne(
   return `sent ${row.ad_id}`;
 }
 
+/** One screen that answers "is this thing working?" */
+export async function statusReport(env: Env, store: Store, profile: Profile): Promise<string> {
+  const s = await loadSettings(store, profile);
+  const [paused, pstate] = await pauseState(store);
+  const blockedFor = await blockSecondsLeft(store);
+  const stats = await store.stats();
+  const queued = await store.countQueued();
+  const sentHour = await store.pushedSince(3600);
+  const last = await store.lastPushed();
+
+  let head: string;
+  if (paused) head = `⏸ <b>Paused</b> — ${pstate}. Send /start to go again.`;
+  else if (blockedFor)
+    head = `⏳ <b>Waiting out a captcha</b> — back in ${fmtLeft(blockedFor)}. Nothing for you to do.`;
+  else head = `✅ <b>Running</b> — checking every ${s.poll_minutes} min.`;
+
+  const ago = last
+    ? `${fmtLeft(Math.max(0, Math.floor(Date.now() / 1000) - last))} ago`
+    : "nothing sent yet";
+  const seen = Object.entries(stats).map(([k, v]) => `${k} ${v}`).join(", ") || "nothing yet";
+
+  return [
+    head,
+    "",
+    `Sent this hour:  ${sentHour} of ${s.max_per_hour}`,
+    `Waiting to draft: ${queued}`,
+    `Last ad sent:    ${ago}`,
+    `Cities watched:  ${(profile.searches ?? []).length}`,
+    "",
+    `Seen so far: ${seen}`,
+  ].join("\n");
+}
+
+
 function header(row: AdRow, lang: string, used: string[], thin: boolean): string {
   const flag = lang === "de" ? "DE" : "EN";
   const warn = thin ? " · <i>thin ad</i>" : "";
@@ -231,14 +265,27 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
 
   switch (cmd) {
     case "/start":
+    case "/resume": {
+      const [wasPaused] = await pauseState(store);
+      if (wasPaused) await resume(store);
+      const note = wasPaused ? "Started.\n\n" : "";
+      await reply(note + (await statusReport(env, store, profile)) +
+        `\n\n/status — is it running\n/pause [2h] — stop it\n` +
+        `/scan — check now\n/more [n] — send more now\n` +
+        `/filters — which ads qualify\n/settings — timing\n/stats — totals`);
+      return;
+    }
+
+    case "/status":
+      await reply(await statusReport(env, store, profile));
+      return;
+
     case "/help":
       await reply(
-        `WG watcher running.\nPosting ads to: ${env.TELEGRAM_CHAT_ID}\n` +
-        `Commands from user id: ${owner}\nYou are: ${from.id}\n\n` +
-        `${await behaviourSummary(store, profile)}\n\n` +
-        `/pause [2h] — stop searching\n/resume — start again\n` +
-        `/scan — check now\n/stats — what I've seen\n` +
-        `/filters — ad filters\n/settings — timing\n/retry — re-draft failed`);
+        `/start — start it (also un-pauses)\n/status — is it running\n` +
+        `/pause [2h] — stop it\n/scan — check now\n/more [n] — send more now\n` +
+        `/filters — which ads qualify\n/settings — timing\n` +
+        `/stats — totals\n/retry — re-draft failed`);
       return;
 
     case "/stats": {
@@ -280,16 +327,7 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
         return;
       }
       const msg = await pause(store, secs);
-      await reply(`${msg}. Nothing is lost — queued ads stay queued. /resume when you want it back.`);
-      return;
-    }
-
-    case "/resume": {
-      await resume(store);
-      const left = await blockSecondsLeft(store);
-      await reply(left
-        ? `Un-paused, but wg-gesucht still has us blocked — trying again in ${fmtLeft(left)}.`
-        : "Running again. I'll check on the next tick.");
+      await reply(`${msg}. Nothing is lost — queued ads stay queued. /start when you want it back.`);
       return;
     }
 

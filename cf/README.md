@@ -10,7 +10,7 @@ always-on process to babysit.
 | Runs | a long-lived process | cron every 2 min + webhook |
 | Storage | SQLite file | D1 |
 | Telegram | long-polling | webhook |
-| Profile | `profile.yaml` | base64 secret |
+| Profile | `profile.yaml` | a row in D1 |
 
 Each cron tick does **one** small thing — refresh one city's listing, or draft
 one queued ad — so no invocation comes near the free plan's 10 ms CPU limit.
@@ -31,14 +31,17 @@ Copy the printed `database_id` into `wrangler.toml`, then create the tables:
 
     npm run db:init
 
-### 3. Secrets
+### 3. Load your profile
 
-Your profile is personal, so it goes in as a secret rather than the repo:
+`profile.yaml` is ~4.5KB of JSON, which exceeds the 5.1KB limit on Worker
+secrets once encoded — so it lives in D1 instead:
 
     ./make-profile.sh
-    npx wrangler secret put PROFILE_B64 < profile.b64
+    npx wrangler d1 execute wg-finder --remote --file=profile.sql
 
-Then the rest:
+It is cached per isolate, so this costs nothing at runtime.
+
+### 4. Secrets
 
     npx wrangler secret put OPENAI_API_KEY
     npx wrangler secret put TELEGRAM_BOT_TOKEN
@@ -46,13 +49,13 @@ Then the rest:
     npx wrangler secret put TELEGRAM_OWNER_ID    # your user id — only you can command it
     npx wrangler secret put WEBHOOK_SECRET       # any random string you invent
 
-### 4. Deploy
+### 5. Deploy
 
     npm run deploy
 
 Note the URL it prints, e.g. `https://wg-finder.<you>.workers.dev`.
 
-### 5. Point Telegram at it
+### 6. Point Telegram at it
 
 Telegram pushes updates to you instead of you polling. Register the webhook,
 using the same secret you set above:
@@ -78,12 +81,17 @@ Logs:
 
 Change your profile later: edit `../profile.yaml`, then
 
-    ./make-profile.sh && npx wrangler secret put PROFILE_B64 < profile.b64
+    ./make-profile.sh
+    npx wrangler d1 execute wg-finder --remote --file=profile.sql
+
+The Worker caches the profile per isolate, so give it a minute (or redeploy)
+for the change to take everywhere.
 
 ## Local development
 
     cp .dev.vars.example .dev.vars   # then fill it in
     npx wrangler d1 execute wg-finder --local --file=schema.sql
+    npx wrangler d1 execute wg-finder --local --file=profile.sql
     npx wrangler dev --local --test-scheduled
 
 Fire a scan by hand:

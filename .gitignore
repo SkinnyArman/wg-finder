@@ -17,3 +17,4 @@ cf/.wrangler/
 cf/.dev.vars
 cf/profile.json
 cf/profile.b64
+cf/profile.sql

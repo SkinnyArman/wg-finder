@@ -3,4 +3,5 @@ node_modules/
 .dev.vars
 profile.json
 profile.b64
+profile.sql
 package-lock.json

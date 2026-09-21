@@ -11,7 +11,7 @@ crons = ["*/2 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "wg-finder"
-database_id = "PUT_YOUR_D1_ID_HERE"
+database_id = "2982a6b8-3107-401c-bed5-7a30249781f6"
 
 [vars]
 OPENAI_MODEL = "gpt-5.6-terra"

@@ -1,11 +1,20 @@
 #!/bin/bash
-# Converts ../profile.yaml into the base64 blob the Worker expects.
+# Turns ../profile.yaml into profile.sql, which seeds the profile into D1.
+# (It is ~4.5KB of JSON — too big for a Worker secret's 5.1KB limit.)
+set -e
 cd "$(dirname "$0")"
+
 ../venv/bin/python -c "
-import base64, json, yaml, pathlib
+import json, yaml, pathlib
 d = yaml.safe_load(pathlib.Path('../profile.yaml').read_text(encoding='utf-8'))
-raw = json.dumps(d, ensure_ascii=False).encode('utf-8')
-pathlib.Path('profile.b64').write_text(base64.b64encode(raw).decode())
-print(f'profile.b64 written ({len(raw)} bytes JSON)')
+raw = json.dumps(d, ensure_ascii=False, separators=(',', ':'))
+esc = raw.replace(chr(39), chr(39)*2)          # SQL-escape single quotes
+pathlib.Path('profile.sql').write_text(
+    \"INSERT INTO kv (k,v) VALUES ('profile','\" + esc + \"')\n\"
+    \"ON CONFLICT(k) DO UPDATE SET v=excluded.v;\n\", encoding='utf-8')
+print(f'profile.sql written ({len(raw)} bytes of JSON)')
 "
-echo "Now run:  npx wrangler secret put PROFILE_B64 < profile.b64"
+
+echo
+echo "Now load it into D1:"
+echo "  npx wrangler d1 execute wg-finder --remote --file=profile.sql"

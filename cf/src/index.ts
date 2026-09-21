@@ -12,7 +12,6 @@ import { Telegram, esc, type Button } from "./telegram.ts";
 
 export interface Env {
   DB: D1Database;
-  PROFILE_B64: string;   // base64 of profile.json (avoids env escaping hell)
   OPENAI_API_KEY: string;
   OPENAI_MODEL: string;
   TELEGRAM_BOT_TOKEN: string;
@@ -24,11 +23,21 @@ export interface Env {
 const PENDLER = ["pendler", "wochenend", "zwischenmiete", "nur unter der woche",
   "mo-do", "mo - do", "monday to thursday", "weekdays only", "commuter"];
 
-function profileOf(env: Env): Profile {
-  // base64 so apostrophes/newlines in the profile can't break env parsing
-  const bin = atob(env.PROFILE_B64);
-  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
-  return JSON.parse(new TextDecoder().decode(bytes)) as Profile;
+// The profile is ~4.5KB of JSON - too big for a Worker secret (5.1KB limit,
+// and base64 inflates it). It lives in D1 instead, seeded by make-profile.sh.
+// Cached per isolate so repeated invocations don't re-read or re-parse it.
+let _profileCache: Profile | null = null;
+
+async function profileOf(env: Env): Promise<Profile> {
+  if (_profileCache) return _profileCache;
+  const raw = await new Store(env.DB).kvGet("profile");
+  if (!raw) {
+    throw new Error(
+      "No profile in D1. Run ./make-profile.sh then: " +
+      "npx wrangler d1 execute wg-finder --remote --file=profile.sql");
+  }
+  _profileCache = JSON.parse(raw) as Profile;
+  return _profileCache;
 }
 
 function passes(ad: Ad, s: Settings): [boolean, string] {
@@ -55,7 +64,7 @@ function passes(ad: Ad, s: Settings): [boolean, string] {
  */
 async function step(env: Env, tg: Telegram): Promise<string> {
   const store = new Store(env.DB);
-  const profile = profileOf(env);
+  const profile = await profileOf(env);
 
   const [paused] = await pauseState(store);
   if (paused) return "paused";
@@ -199,7 +208,7 @@ const filtersKeyboard = (s: Settings): Button[][] => [
 
 async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> {
   const store = new Store(env.DB);
-  const profile = profileOf(env);
+  const profile = await profileOf(env);
 
   const from = update.message?.from ?? update.callback_query?.from;
   const owner = String(env.TELEGRAM_OWNER_ID || env.TELEGRAM_CHAT_ID);

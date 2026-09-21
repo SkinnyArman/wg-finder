@@ -71,7 +71,7 @@ function passes(ad: Ad, s: Settings): [boolean, string] {
  *   - if an ad is queued, fetch its description, draft it, send it
  *   - otherwise refresh the next city's listing
  */
-async function step(env: Env, tg: Telegram): Promise<string> {
+async function step(env: Env, tg: Telegram, force = false): Promise<string> {
   const store = new Store(env.DB);
   const profile = await profileOf(env);
 
@@ -86,8 +86,11 @@ async function step(env: Env, tg: Telegram): Promise<string> {
   try {
     const queued = await store.nextQueued();
     if (queued) {
-      const budget = s.max_per_hour - (await store.pushedSince(3600));
-      if (budget <= 0) return "hourly cap reached";
+      // /more deliberately overrides the hourly cap
+      if (!force) {
+        const budget = s.max_per_hour - (await store.pushedSince(3600));
+        if (budget <= 0) return "hourly cap reached";
+      }
       return await draftOne(env, tg, store, profile, queued);
     }
     return await refreshOneCity(env, store, profile, s);
@@ -375,9 +378,16 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
 
     case "/more": {
       const n = Math.min(Math.max(Number(args[0] ?? 3) || 3, 1), 10);
-      const out: string[] = [];
-      for (let i = 0; i < n; i++) out.push(await step(env, tg));
-      await reply(out.join("\n"));
+      await reply(`Sending up to ${n} now, ignoring the hourly cap…`);
+      let sent = 0;
+      const notes: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const r = await step(env, tg, true);          // force past the cap
+        if (r.startsWith("sent ")) sent++;
+        else { notes.push(r); break; }                // queue empty, blocked, paused
+      }
+      const tail = notes.length ? `\n${notes[0]}` : "";
+      await reply(`Sent ${sent} ad${sent === 1 ? "" : "s"}.${tail}`);
       return;
     }
 

@@ -12,3 +12,8 @@ __pycache__/
 *.pyc
 .DS_Store
 profile.yaml
+cf/node_modules/
+cf/.wrangler/
+cf/.dev.vars
+cf/profile.json
+cf/profile.b64

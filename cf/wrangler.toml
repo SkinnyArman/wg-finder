@@ -1,0 +1,17 @@
+name = "wg-finder"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# One step every 2 minutes. Each step is tiny: refresh one city's listing,
+# or fetch+draft one queued ad. That keeps every invocation well under the
+# free plan's 10ms CPU budget.
+[triggers]
+crons = ["*/2 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "wg-finder"
+database_id = "PUT_YOUR_D1_ID_HERE"
+
+[vars]
+OPENAI_MODEL = "gpt-5.6-terra"

@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+profile.json
+profile.b64
+package-lock.json

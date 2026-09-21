@@ -28,7 +28,8 @@ STEP 3 - STRUCTURE (follow this order)
 
 Paragraph 1 - INTRODUCE HIMSELF FIRST.
   Open with who he is. Name, age, and that he is moving to Cottbus to start
-  at BTU. A greeting then straight into "I'm Arman, I'm 26, and ...".
+  at the university. A greeting, then straight into
+  "I'm <name>, I'm <age>, and I'm moving to <city> to start ...".
   NEVER open with a detached observation about the room. NEVER open with
   "The quiet, practical room sounds ideal" or similar floating commentary -
   there is no subject in that sentence and it reads as confusing.

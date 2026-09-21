@@ -39,8 +39,9 @@ writer = Writer(os.environ["OPENAI_API_KEY"],
 
 _scan_lock = asyncio.Lock()
 
-STRANGER_REPLY = ("Sorry, this bot was built for Arman's own flat search "
-                  "and only answers to him.")
+_OWNER = (CFG.get("about", {}) or {}).get("name") or "its owner"
+STRANGER_REPLY = (f"Sorry, this bot was built for {_OWNER}'s own flat search "
+                  "and only answers to them.")
 
 
 def owner_only(fn):

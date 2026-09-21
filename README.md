@@ -107,8 +107,8 @@ polite refusal and nothing runs.
 
 ## Deploying
 
-See [DEPLOY.md](DEPLOY.md) — Oracle Cloud's Always Free tier runs it 24/7 at
-no cost.
+See [DEPLOY.md](DEPLOY.md). Google Cloud's Always Free `e2-micro` runs it
+24/7 at no cost and, unlike Oracle, won't reclaim it for being idle.
 
 ## When wg-gesucht blocks you
 

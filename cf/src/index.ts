@@ -232,18 +232,20 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
   switch (cmd) {
     case "/start":
     case "/help":
-      return void reply(
+      await reply(
         `WG watcher running.\nPosting ads to: ${env.TELEGRAM_CHAT_ID}\n` +
         `Commands from user id: ${owner}\nYou are: ${from.id}\n\n` +
         `${await behaviourSummary(store, profile)}\n\n` +
         `/pause [2h] — stop searching\n/resume — start again\n` +
         `/scan — check now\n/stats — what I've seen\n` +
         `/filters — ad filters\n/settings — timing\n/retry — re-draft failed`);
+      return;
 
     case "/stats": {
       const st = await store.stats();
       const body = Object.entries(st).map(([k, v]) => `${k}: ${v}`).join("\n");
-      return void reply(body || "Nothing seen yet.");
+      await reply(body || "Nothing seen yet.");
+      return;
     }
 
     case "/settings": {
@@ -254,8 +256,9 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
       }
       const s = await loadSettings(store, profile);
       const [p] = await pauseState(store);
-      return void reply(await behaviourSummary(store, profile),
+      await reply(await behaviourSummary(store, profile),
         tg.keyboard(settingsKeyboard(s, p)));
+      return;
     }
 
     case "/filters": {
@@ -265,48 +268,60 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
         if (!ok) return;
       }
       const s = await loadSettings(store, profile);
-      return void reply(await filtersSummary(store, profile),
+      await reply(await filtersSummary(store, profile),
         tg.keyboard(filtersKeyboard(s)));
+      return;
     }
 
     case "/pause": {
       const secs = args[0] ? parseDuration(args[0]) : null;
-      if (args[0] && secs === null)
-        return void reply("Try /pause, /pause 30m, /pause 2h, /pause 1d");
+      if (args[0] && secs === null) {
+        await reply("Try /pause, /pause 30m, /pause 2h, /pause 1d");
+        return;
+      }
       const msg = await pause(store, secs);
-      return void reply(`${msg}. Nothing is lost — queued ads stay queued. /resume when you want it back.`);
+      await reply(`${msg}. Nothing is lost — queued ads stay queued. /resume when you want it back.`);
+      return;
     }
 
     case "/resume": {
       await resume(store);
       const left = await blockSecondsLeft(store);
-      return void reply(left
+      await reply(left
         ? `Un-paused, but wg-gesucht still has us blocked — trying again in ${fmtLeft(left)}.`
         : "Running again. I'll check on the next tick.");
+      return;
     }
 
     case "/scan": {
       const left = await blockSecondsLeft(store);
-      if (left) return void reply(`Still blocked by wg-gesucht — trying again in ${fmtLeft(left)}.`);
+      if (left) {
+        await reply(`Still blocked by wg-gesucht — trying again in ${fmtLeft(left)}.`);
+        return;
+      }
       const r = await step(env, tg);
-      return void reply(`Checked: ${r}`);
+      await reply(`Checked: ${r}`);
+      return;
     }
 
     case "/more": {
       const n = Math.min(Math.max(Number(args[0] ?? 3) || 3, 1), 10);
       const out: string[] = [];
       for (let i = 0; i < n; i++) out.push(await step(env, tg));
-      return void reply(out.join("\n"));
+      await reply(out.join("\n"));
+      return;
     }
 
     case "/retry": {
       const n = await store.retryFailed();
       await clearBlock(store);
-      return void reply(`Cleared ${n} failed ad(s).`);
+      await reply(`Cleared ${n} failed ad(s).`);
+      return;
     }
 
     default:
-      return void reply("Unknown command. /help");
+      await reply("Unknown command. /help");
+      return;
   }
 }
 
@@ -320,7 +335,10 @@ async function handleButton(
   if (data.startsWith("set:") || data.startsWith("flt:")) {
     const parts = data.split(":");
     const isSettings = parts[0] === "set";
-    if (parts[1] === "noop") return void tg.answerCallback(cq.id);
+    if (parts[1] === "noop") {
+      await tg.answerCallback(cq.id);
+      return;
+    }
     if (parts[1] === "pause") { await pause(store, null); await tg.answerCallback(cq.id, "Paused"); }
     else if (parts[1] === "resume") { await resume(store); await tg.answerCallback(cq.id, "Running again"); }
     else {
@@ -344,7 +362,10 @@ async function handleButton(
 
   const [action, adId] = data.split(":");
   const row = await store.get(adId);
-  if (!row) return void tg.answerCallback(cq.id, "Unknown ad.");
+  if (!row) {
+    await tg.answerCallback(cq.id, "Unknown ad.");
+    return;
+  }
 
   if (action === "no") {
     await store.setStatus(adId, "skipped");

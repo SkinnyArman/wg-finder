@@ -39,8 +39,48 @@ export function isCaptcha(html: string): boolean {
   );
 }
 
-export async function get(url: string): Promise<string> {
-  const r = await fetch(url, { headers: HEADERS });
+export interface CookieJar {
+  read(): Promise<string | null>;
+  write(cookie: string): Promise<void>;
+}
+
+/** Keep only the name=value pairs, joined for a Cookie header. */
+function mergeCookies(existing: string, setCookie: string[]): string {
+  const jar = new Map<string, string>();
+  for (const pair of existing.split(";")) {
+    const [k, ...v] = pair.trim().split("=");
+    if (k && v.length) jar.set(k, v.join("="));
+  }
+  for (const raw of setCookie) {
+    const first = raw.split(";")[0];
+    const [k, ...v] = first.trim().split("=");
+    if (k && v.length) jar.set(k, v.join("="));
+  }
+  return [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+/**
+ * Fetch a page, carrying a session cookie between calls.
+ *
+ * Without this every request looks like a brand-new visitor, which is a
+ * strong bot signal - a real browser picks up a session on first contact and
+ * keeps using it. The jar lives in D1 so it survives across invocations.
+ */
+export async function get(url: string, jar?: CookieJar): Promise<string> {
+  const cookie = jar ? await jar.read() : null;
+  const headers: Record<string, string> = { ...HEADERS, Referer: `${BASE}/` };
+  if (cookie) headers["Cookie"] = cookie;
+
+  const r = await fetch(url, { headers });
+
+  if (jar) {
+    // Workers expose multiple Set-Cookie headers via getSetCookie()
+    const set = typeof (r.headers as any).getSetCookie === "function"
+      ? (r.headers as any).getSetCookie() as string[]
+      : (r.headers.get("set-cookie") ? [r.headers.get("set-cookie") as string] : []);
+    if (set.length) await jar.write(mergeCookies(cookie ?? "", set));
+  }
+
   if (r.status !== 200) throw new Blocked(`HTTP ${r.status} from wg-gesucht`);
   const html = await r.text();
   if (isCaptcha(html)) throw new Blocked("wg-gesucht is showing its captcha");

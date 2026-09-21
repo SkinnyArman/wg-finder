@@ -1,5 +1,6 @@
 import {
-  Blocked, get, parseListing, parseAdText, flatmates, rentEur, type Ad,
+  Blocked, get, parseListing, parseAdText, flatmates, rentEur,
+  type Ad, type CookieJar,
 } from "./scraper.ts";
 import { Store, type AdRow } from "./store.ts";
 import {
@@ -38,6 +39,14 @@ async function profileOf(env: Env): Promise<Profile> {
   }
   _profileCache = JSON.parse(raw) as Profile;
   return _profileCache;
+}
+
+/** Session cookies persisted in D1 so we look like a returning visitor. */
+function cookieJar(store: Store): CookieJar {
+  return {
+    read: () => store.kvGet("cookies"),
+    write: (c: string) => store.kvSet("cookies", c),
+  };
 }
 
 function passes(ad: Ad, s: Settings): [boolean, string] {
@@ -103,12 +112,24 @@ async function refreshOneCity(
   const searches = profile.searches ?? [];
   if (!searches.length) return "no searches configured";
 
+  // The cron fires every 2 minutes, but that is the step rate, not the
+  // crawl rate. Spread one full pass over poll_minutes: with 60 minutes and
+  // 6 cities that is one listing every 10 minutes, ~6 requests an hour
+  // instead of 30. Hammering the site is what gets us captcha'd.
+  const gap = Math.max(60, Math.floor((s.poll_minutes * 60) / searches.length));
+  const last = Number((await store.kvGet("last_refresh")) ?? 0);
+  const nowTs = Math.floor(Date.now() / 1000);
+  if (nowTs - last < gap) {
+    return `idle (next city in ${Math.ceil((gap - (nowTs - last)) / 60)} min)`;
+  }
+  await store.kvSet("last_refresh", String(nowTs));
+
   // round-robin so each tick touches exactly one city
   const idx = Number((await store.kvGet("city_cursor")) ?? 0) % searches.length;
   await store.kvSet("city_cursor", String((idx + 1) % searches.length));
   const search = searches[idx];
 
-  const html = await get(search.url);
+  const html = await get(search.url, cookieJar(store));
   const ads = parseListing(html);
   const seen = await store.seenMany(ads.map((a) => a.ad_id));
 
@@ -126,7 +147,7 @@ async function refreshOneCity(
 async function draftOne(
   env: Env, tg: Telegram, store: Store, profile: Profile, row: AdRow,
 ): Promise<string> {
-  const html = await get(row.url);
+  const html = await get(row.url, cookieJar(store));
   const text = parseAdText(html);
   if (text.trim().length < 80) {
     await store.noteFailure(row.ad_id);

@@ -29,14 +29,21 @@ export interface Ad {
 
 export class Blocked extends Error {}
 
-/** wg-gesucht serves an "Überprüfung" captcha page when rate limited. */
+/**
+ * wg-gesucht serves an "Überprüfung" page when it wants a captcha.
+ *
+ * Match on the TITLE only. Every normal page mentions "captcha" - their
+ * cookie-consent config lists recaptcha.net, and the contact form has a
+ * data-input="captcha" field - so searching the body for that word flags
+ * every ad page as a challenge.
+ */
 export function isCaptcha(html: string): boolean {
-  const low = html.toLowerCase();
-  return (
-    low.includes("<title>überprüfung") ||
-    low.includes("überprüfung</title>") ||
-    (low.includes("captcha") && !low.includes("liste-details-ad-"))
-  );
+  // real content present => definitely a normal page
+  if (html.includes("liste-details-ad-") || html.includes('id="ad_description_text"'))
+    return false;
+  const m = /<title>([^<]*)<\/title>/i.exec(html);
+  const title = (m?.[1] ?? "").toLowerCase();
+  return title.includes("überprüfung") || title.includes("uberprufung");
 }
 
 export interface CookieJar {

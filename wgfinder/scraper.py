@@ -24,10 +24,17 @@ class Blocked(Exception):
 
 
 def _is_captcha(html: str) -> bool:
-    low = html.lower()
-    return ("<title>überprüfung" in low
-            or "überprüfung</title>" in low
-            or ("captcha" in low and "wgg_card" not in low and "offer_list_item" not in low))
+    """Match the challenge page's TITLE only.
+
+    Every normal page mentions "captcha" - their cookie-consent config lists
+    recaptcha.net and the contact form has a data-input="captcha" field - so
+    scanning the body for that word flags every ad page as a challenge.
+    """
+    if 'liste-details-ad-' in html or 'id="ad_description_text"' in html:
+        return False
+    m = re.search(r"<title>([^<]*)</title>", html, re.I)
+    title = (m.group(1) if m else "").lower()
+    return "überprüfung" in title or "uberprufung" in title
 
 BASE = "https://www.wg-gesucht.de"
 DEBUG_DIR = Path(__file__).resolve().parent.parent / "debug"

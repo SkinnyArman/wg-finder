@@ -162,8 +162,18 @@ async function draftOne(
     district: row.district, text, flatmates: row.flatmates,
   });
 
+  // Deliver FIRST, then mark it done. Marking first meant a failed send
+  // looked like a success: the ad showed as 'pending' with a pushed_at
+  // timestamp while nothing ever reached Telegram.
+  try {
+    await push(tg, row, draft.language, draft.facts_used, draft.thin_ad, draft.message);
+  } catch (e: any) {
+    // keep the draft so we don't pay OpenAI twice, but leave it queued
+    await store.keepDraft(row.ad_id, draft.language, text, draft.message);
+    console.error(`delivery failed for ${row.ad_id}:`, e?.message ?? e);
+    throw new Error(`Telegram delivery failed: ${e?.message ?? e}`);
+  }
   await store.saveDraft(row.ad_id, draft.language, text, draft.message);
-  await push(tg, row, draft.language, draft.facts_used, draft.thin_ad, draft.message);
   return `sent ${row.ad_id}`;
 }
 

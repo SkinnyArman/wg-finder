@@ -74,6 +74,14 @@ export class Store {
       .bind(language, adText, message, now(), now(), adId).run();
   }
 
+  /** Store the generated text but leave the ad queued (delivery failed). */
+  async keepDraft(adId: string, language: string, adText: string, message: string) {
+    await this.db.prepare(
+      `UPDATE ads SET language=?, ad_text=?, message=?, status='queued',
+                      pushed_at=NULL, updated=? WHERE ad_id=?`)
+      .bind(language, adText, message, now(), adId).run();
+  }
+
   async setStatus(adId: string, status: string) {
     await this.db.prepare("UPDATE ads SET status=?, updated=? WHERE ad_id=?")
       .bind(status, now(), adId).run();

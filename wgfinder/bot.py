@@ -31,7 +31,19 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
 CFG = yaml.safe_load((ROOT / "profile.yaml").read_text(encoding="utf-8"))
+# Where ads are posted. A group id (negative) or your own chat id.
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+# Who may command the bot. In a group everyone can see the buttons, so this
+# is checked per USER, not per chat - otherwise any member could hit Approve.
+OWNER_ID = os.environ.get("TELEGRAM_OWNER_ID", "").strip() or CHAT_ID
+
+if str(CHAT_ID).startswith("-") and OWNER_ID == CHAT_ID:
+    raise SystemExit(
+        "TELEGRAM_CHAT_ID looks like a group, but TELEGRAM_OWNER_ID is not set.\n"
+        "A group id can never match a user id, so nobody - including you -\n"
+        "would be able to command the bot.\n\n"
+        "Run:  ./venv/bin/python get_chat_id.py\n"
+        "and put your personal user id in .env as TELEGRAM_OWNER_ID.")
 SCAN_JOB = "scan"
 UNBLOCK_JOB = "unblock"
 _burst = 0          # extra ads unlocked by /more, consumed by the next scan
@@ -49,18 +61,23 @@ STRANGER_REPLY = (f"Sorry, this bot was built for {_OWNER}'s own flat search "
 
 
 def owner_only(fn):
-    """Every handler is wrapped: strangers get a polite no and nothing runs."""
+    """Only the owner may command the bot, in any chat it's in.
+
+    Checked on the USER, not the chat: in a group every member can see and
+    tap the inline buttons, so a chat-level check would let anyone approve
+    or change settings.
+    """
     @functools.wraps(fn)
     async def guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat = update.effective_chat
-        if not chat or str(chat.id) != str(CHAT_ID):
-            log.warning("ignored %s from chat %s",
-                        getattr(update.effective_user, "username", "?"),
-                        chat.id if chat else "?")
-            if update.message:
-                await update.message.reply_text(STRANGER_REPLY)
-            elif update.callback_query:
+        user = update.effective_user
+        if not user or str(user.id) != str(OWNER_ID):
+            who = f"@{user.username}" if user and user.username else "someone"
+            log.warning("ignored command from %s (id %s)",
+                        who, user.id if user else "?")
+            if update.callback_query:
                 await update.callback_query.answer(STRANGER_REPLY, show_alert=True)
+            elif update.message:
+                await update.message.reply_text(STRANGER_REPLY)
             return
         return await fn(update, context)
     return guard
@@ -313,8 +330,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def cmd_start(update: Update, _):
+    chat = update.effective_chat
+    where = "this group" if chat.type in ("group", "supergroup") else "here"
     await update.message.reply_text(
-        f"WG watcher running.\nYour chat id: {update.effective_chat.id}\n"
+        f"WG watcher running.\n"
+        f"Posting ads to: {CHAT_ID} ({where})\n"
+        f"Commands from user id: {OWNER_ID}\n"
+        f"You are user id: {update.effective_user.id}\n\n"
         f"{settings.behaviour_summary()}\n\n"
         "/pause [2h] - stop searching (forever, or for a while)\n"
         "/resume   - start again\n"

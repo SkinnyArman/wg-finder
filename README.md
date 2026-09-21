@@ -102,8 +102,19 @@ ships `profile.example.yaml` with placeholders. Copy it and fill it in:
 
     cp profile.example.yaml profile.yaml
 
-The bot only answers your `TELEGRAM_CHAT_ID`. Anyone else who finds it gets a
-polite refusal and nothing runs.
+The bot posts to `TELEGRAM_CHAT_ID` and takes orders only from
+`TELEGRAM_OWNER_ID`. Anyone else gets a polite refusal and nothing runs.
+
+### Running it in a group
+
+Add the bot to the group, then set `TELEGRAM_CHAT_ID` to the **group id**
+(negative) and `TELEGRAM_OWNER_ID` to **your own user id**. Run
+`./venv/bin/python get_chat_id.py` after posting in the group and it prints
+both, labelled.
+
+Permission is checked on the **user**, not the chat — in a group everyone can
+see the inline buttons, so a chat-level check would let any member hit
+Approve. Others who try get a popup only they see, so the group stays clean.
 
 ## Deploying
 

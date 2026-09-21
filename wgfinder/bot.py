@@ -33,6 +33,7 @@ log = logging.getLogger("bot")
 CFG = yaml.safe_load((ROOT / "profile.yaml").read_text(encoding="utf-8"))
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 SCAN_JOB = "scan"
+UNBLOCK_JOB = "unblock"
 _burst = 0          # extra ads unlocked by /more, consumed by the next scan
 _tick = 0
 _cancel = False     # set by /pause to stop a scan already in progress
@@ -180,6 +181,7 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int]:
             already, _ = settings.block_state()
             backoff = settings.load()["block_backoff_min"]
             settings.start_block(backoff)
+            _schedule_unblock(app, backoff * 60)
             if already:
                 log.warning("captcha again; backoff extended to %d min", backoff)
                 return "blocked", 0
@@ -189,10 +191,10 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int]:
                 f"<b>Paused: wg-gesucht wants a captcha</b>\n\n"
                 f"This is their rate limiting, not a crash, and nothing is "
                 f"lost - every ad I hadn't got to is still queued.\n\n"
-                f"I'll wait <b>{backoff} minutes</b> and start again by myself. "
-                f"You don't need to do anything. Asking me to scan before then "
-                f"only makes it last longer.\n\n"
-                f"Check the time left with /settings.",
+                f"<b>Trying again in {backoff} minutes</b>, automatically - "
+                f"you don't need to do anything, and you don't need to keep "
+                f"the app open. I'll message you when I'm back.\n\n"
+                f"Countdown: /settings",
                 parse_mode=ParseMode.HTML)
             return "blocked", 0
         except Exception as e:
@@ -374,9 +376,10 @@ async def _blocked_reply(update) -> bool:
     blocked, left = settings.block_state()
     if blocked:
         await update.message.reply_text(
-            f"wg-gesucht is still showing a captcha. {left} left on the backoff.\n\n"
-            f"Asking again now would only extend it - I'll start by myself when "
-            f"the timer runs out.")
+            f"Still blocked by wg-gesucht - <b>trying again in {left}</b>.\n\n"
+            f"That happens by itself, so there's nothing to do. Asking me now "
+            f"would only push the timer back.",
+            parse_mode=ParseMode.HTML)
     return blocked
 
 
@@ -426,6 +429,36 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = _outcome(*await scan(context))
     if msg:
         await update.message.reply_text(msg)
+
+
+async def _after_block(context: ContextTypes.DEFAULT_TYPE):
+    """Runs the moment the captcha backoff expires - no waiting for the
+    next hourly tick."""
+    left = settings.block_seconds_left()
+    if left > 0:                      # backoff was extended meanwhile
+        _schedule_unblock(context.application, left)
+        return
+    settings.clear_block()
+    paused, _ = settings.pause_state()
+    if paused:
+        log.info("Backoff over, but still paused by you.")
+        return
+    log.info("Backoff over - resuming automatically.")
+    await context.bot.send_message(
+        CHAT_ID, "The wait is over - back to checking for rooms.")
+    status, sent = await scan(context)
+    msg = _outcome(status, sent)
+    if msg and status == "ok" and sent:
+        await context.bot.send_message(CHAT_ID, msg)
+
+
+def _schedule_unblock(app, seconds: int) -> None:
+    """One-shot wake-up for the exact moment the backoff ends."""
+    for job in app.job_queue.get_jobs_by_name(UNBLOCK_JOB):
+        job.schedule_removal()
+    app.job_queue.run_once(_after_block, when=max(5, seconds) + 5,
+                           name=UNBLOCK_JOB)
+    log.info("will resume automatically in %d min", seconds // 60 + 1)
 
 
 def _reschedule(app) -> int:
@@ -568,6 +601,10 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button))
 
     _reschedule(app)
+    left = settings.block_seconds_left()
+    if left:
+        log.info("still blocked from a previous run - %d min left", left // 60 + 1)
+        _schedule_unblock(app, left)
 
     log.info("Bot up. Send /start in Telegram.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

@@ -110,6 +110,21 @@ polite refusal and nothing runs.
 See [DEPLOY.md](DEPLOY.md) — Oracle Cloud's Always Free tier runs it 24/7 at
 no cost.
 
+## When wg-gesucht blocks you
+
+Too many requests and the site serves a captcha instead of listings. The bot
+handles this without you:
+
+1. It tells you it's blocked and **when it will try again**.
+2. The countdown is stored on disk, so restarting the bot doesn't reset it —
+   restarting to "fix" it would only make the block last longer.
+3. `/scan`, `/more` and `/resume` refuse while it's running, showing the time
+   left.
+4. The moment the timer expires it resumes **by itself** and messages you.
+   It does not wait for the next hourly check.
+
+Nothing is lost while blocked; queued ads stay queued.
+
 ## Notes
 - Every ad seen is recorded in `wgfinder.db` and never shown twice.
 - Polls with ±90s jitter, 2.5–6s between page loads, max 8 drafts per tick.

@@ -160,6 +160,13 @@ def clear_block() -> None:
     _write("blocked_until", 0)
 
 
+def block_seconds_left() -> int:
+    """Seconds until the captcha backoff lifts. 0 when not blocked."""
+    import time as _t
+    v = int(load().get("blocked_until") or 0)
+    return max(0, v - int(_t.time())) if v > 0 else 0
+
+
 def block_state() -> tuple[bool, str]:
     """(is_blocked, 'time left'). Survives restarts, so a restart can't
     bypass the backoff and walk straight back into the captcha."""

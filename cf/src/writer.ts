@@ -12,6 +12,7 @@ export interface Draft {
 interface AdLike {
   title: string; rent: string; size: string; district: string;
   text?: string | null; flatmates?: string;
+  details?: Record<string, string>;   // e.g. Kleinanzeigen "Verfügbar ab"
 }
 
 function profileBlock(p: Profile): string {
@@ -46,6 +47,12 @@ function profileBlock(p: Profile): string {
   return L.join("\n");
 }
 
+/** Structured listing facts - "Verfügbar ab" feeds the move-in rule. */
+function detailsBlock(d?: Record<string, string>): string {
+  const e = Object.entries(d ?? {});
+  return e.length ? "Listing facts:\n" + e.map(([k, v]) => `  ${k}: ${v}`).join("\n") + "\n" : "";
+}
+
 export async function compose(
   apiKey: string, model: string, profile: Profile, ad: AdLike, retryNote = "",
 ): Promise<Draft> {
@@ -56,7 +63,8 @@ export async function compose(
     `${profileBlock(profile)}\n\n` +
     `=== THE ANZEIGE ===\n` +
     `Title: ${ad.title}\nRent: ${ad.rent}\nSize: ${ad.size}\n` +
-    `Area: ${ad.district}\nFlat: ${ad.flatmates || "not stated"}\n\n` +
+    `Area: ${ad.district}\nFlat: ${ad.flatmates || "not stated"}\n` +
+    detailsBlock(ad.details) + "\n" +
     `Description:\n${adText || "(no description text could be extracted)"}\n`;
   if (retryNote) user += `\n=== REWRITE REQUEST ===\n${retryNote}\n`;
 

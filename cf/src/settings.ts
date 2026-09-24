@@ -100,18 +100,31 @@ export async function pause(store: Store, seconds: number | null): Promise<strin
 
 export const resume = (store: Store) => store.kvSet("paused_until", "0");
 
-// ---------- captcha backoff ----------
-export async function blockSecondsLeft(store: Store): Promise<number> {
-  const v = Number((await store.kvGet("blocked_until")) ?? 0);
+// ---------- bot-check backoff, per source ----------
+// Each site backs off on its own: a block on Kleinanzeigen must not stop
+// wg-gesucht, and vice versa. wg-gesucht keeps the original key so existing
+// state carries over.
+export type Source = "wg" | "ka";
+export const SOURCES: Source[] = ["wg", "ka"];
+export const SITE: Record<Source, string> = { wg: "wg-gesucht", ka: "Kleinanzeigen" };
+const blockKey = (src: Source) => (src === "wg" ? "blocked_until" : "blocked_until_ka");
+
+export async function blockSecondsLeft(store: Store, src: Source = "wg"): Promise<number> {
+  const v = Number((await store.kvGet(blockKey(src))) ?? 0);
   if (v <= 0) return 0;
   return Math.max(0, v - Math.floor(Date.now() / 1000));
 }
 
-export async function startBlock(store: Store, minutes: number): Promise<void> {
-  await store.kvSet("blocked_until", String(Math.floor(Date.now() / 1000) + minutes * 60));
+export async function startBlock(store: Store, minutes: number, src: Source = "wg"): Promise<void> {
+  await store.kvSet(blockKey(src), String(Math.floor(Date.now() / 1000) + minutes * 60));
 }
 
-export const clearBlock = (store: Store) => store.kvSet("blocked_until", "0");
+export const clearBlock = (store: Store, src: Source = "wg") => store.kvSet(blockKey(src), "0");
+
+/** Seconds left per source; 0 means that source is usable. */
+export async function blocks(store: Store): Promise<Record<Source, number>> {
+  return { wg: await blockSecondsLeft(store, "wg"), ka: await blockSecondsLeft(store, "ka") };
+}
 
 export function fmtLeft(seconds: number): string {
   const mins = Math.floor(seconds / 60) + 1;
@@ -121,8 +134,9 @@ export function fmtLeft(seconds: number): string {
 export async function behaviourSummary(store: Store, profile: Profile): Promise<string> {
   const s = await loadSettings(store, profile);
   const [, state] = await pauseState(store);
-  const left = await blockSecondsLeft(store);
-  const status = left ? `${state}, captcha backoff ${fmtLeft(left)} left` : state;
+  const b = await blocks(store);
+  const waits = SOURCES.filter((x) => b[x] > 0).map((x) => `${SITE[x]} back in ${fmtLeft(b[x])}`);
+  const status = waits.length ? `${state}; ${waits.join(", ")}` : state;
   return [
     `Status:            ${status}`,
     `Check every:       ${s.poll_minutes} min`,

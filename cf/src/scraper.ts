@@ -1,6 +1,8 @@
 // Port of the Python regex extractor. No DOM: a 344KB listing page costs
 // ~1.5ms this way instead of ~54ms with a real parser.
 
+import { isBlocked as kaIsBlocked } from "./kleinanzeigen.ts";
+
 export const BASE = "https://www.wg-gesucht.de";
 
 const HEADERS: Record<string, string> = {
@@ -24,10 +26,19 @@ export interface Ad {
   women: number;
   men: number;
   diverse: number;
+  snippet?: string;          // listing teaser, used by the filters
+  source: "wg" | "ka";       // wg-gesucht | Kleinanzeigen
   text?: string;
 }
 
-export class Blocked extends Error {}
+/** A site served a bot check. Carries which one, so only that source backs off. */
+export class Blocked extends Error {
+  source: "wg" | "ka";
+  constructor(message: string, source: "wg" | "ka") {
+    super(message);
+    this.source = source;
+  }
+}
 
 /**
  * wg-gesucht serves an "Überprüfung" page when it wants a captcha.
@@ -88,9 +99,12 @@ export async function get(url: string, jar?: CookieJar): Promise<string> {
     if (set.length) await jar.write(mergeCookies(cookie ?? "", set));
   }
 
-  if (r.status !== 200) throw new Blocked(`HTTP ${r.status} from wg-gesucht`);
+  const ka = url.includes("kleinanzeigen.de");
+  const site = ka ? "Kleinanzeigen" : "wg-gesucht";
+  if (r.status !== 200) throw new Blocked(`HTTP ${r.status} from ${site}`, ka ? "ka" : "wg");
   const html = await r.text();
-  if (isCaptcha(html)) throw new Blocked("wg-gesucht is showing its captcha");
+  if (ka ? kaIsBlocked(html) : isCaptcha(html))
+    throw new Blocked(`${site} is showing a bot check`, ka ? "ka" : "wg");
   return html;
 }
 
@@ -168,6 +182,7 @@ export function parseListing(html: string): Ad[] {
       women: wg ? Number(wg[2]) : 0,
       men: wg ? Number(wg[3]) : 0,
       diverse: wg ? Number(wg[4]) : 0,
+      source: "wg",
     });
   }
   return out;

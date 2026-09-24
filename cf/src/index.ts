@@ -1,12 +1,16 @@
 import {
-  Blocked, get, parseListing, parseAdText, flatmates, rentEur,
+  Blocked, get, parseListing, parseAdText, flatmates,
   type Ad, type CookieJar,
 } from "./scraper.ts";
+import {
+  KA_PREFIX, parseListing as kaParseListing, parseAd as kaParseAd,
+} from "./kleinanzeigen.ts";
+import { check, looksFemaleOnly } from "./filters.ts";
 import { Store, type AdRow } from "./store.ts";
 import {
-  behaviourSummary, blockSecondsLeft, clearBlock, filtersSummary, fmtLeft,
+  SITE, SOURCES, behaviourSummary, blocks, clearBlock, filtersSummary, fmtLeft,
   loadSettings, pause, pauseState, resume, setSetting, startBlock,
-  type Profile, type Settings,
+  type Profile, type Settings, type Source,
 } from "./settings.ts";
 import { compose } from "./writer.ts";
 import { Telegram, esc, type Button } from "./telegram.ts";
@@ -20,9 +24,6 @@ export interface Env {
   TELEGRAM_OWNER_ID: string;
   WEBHOOK_SECRET: string;
 }
-
-const PENDLER = ["pendler", "wochenend", "zwischenmiete", "nur unter der woche",
-  "mo-do", "mo - do", "monday to thursday", "weekdays only", "commuter"];
 
 // The profile is ~4.5KB of JSON - too big for a Worker secret (5.1KB limit,
 // and base64 inflates it). It lives in D1 instead, seeded by make-profile.sh.
@@ -41,27 +42,16 @@ async function profileOf(env: Env): Promise<Profile> {
   return _profileCache;
 }
 
-/** Session cookies persisted in D1 so we look like a returning visitor. */
-function cookieJar(store: Store): CookieJar {
-  return {
-    read: () => store.kvGet("cookies"),
-    write: (c: string) => store.kvSet("cookies", c),
-  };
-}
+const sourceOfUrl = (url: string): Source => (url.includes("kleinanzeigen.de") ? "ka" : "wg");
+const sourceOfId = (id: string): Source => (id.startsWith(KA_PREFIX) ? "ka" : "wg");
 
-function passes(ad: Ad, s: Settings): [boolean, string] {
-  const title = (ad.title || "").toLowerCase();
-  for (const bad of s.skip_if_title_contains ?? [])
-    if (title.includes(bad.toLowerCase())) return [false, `title contains '${bad}'`];
-  if (s.skip_female_only && ad.seeking === "female") return [false, "WG wants a woman"];
-  if (s.skip_pendler)
-    for (const w of PENDLER) if (title.includes(w)) return [false, `Pendler room ('${w}')`];
-  const rent = rentEur(ad);
-  if (rent !== null) {
-    if (s.max_rent && rent > s.max_rent) return [false, `${rent} EUR over max`];
-    if (s.min_rent && rent < s.min_rent) return [false, `${rent} EUR under min`];
-  }
-  return [true, ""];
+/**
+ * Session cookies persisted in D1 so we look like a returning visitor.
+ * One jar per site - their sessions have nothing to do with each other.
+ */
+function cookieJar(store: Store, src: Source): CookieJar {
+  const key = src === "wg" ? "cookies" : "cookies_ka";
+  return { read: () => store.kvGet(key), write: (c: string) => store.kvSet(key, c) };
 }
 
 // ---------------------------------------------------------------- one step
@@ -69,7 +59,8 @@ function passes(ad: Ad, s: Settings): [boolean, string] {
  * A single cron tick does ONE small thing, so no invocation comes near the
  * free plan's 10ms CPU budget:
  *   - if an ad is queued, fetch its description, draft it, send it
- *   - otherwise refresh the next city's listing
+ *   - otherwise refresh the next search's listing
+ * A site that is backing off is simply skipped; the other keeps working.
  */
 async function step(env: Env, tg: Telegram, force = false): Promise<string> {
   const store = new Store(env.DB);
@@ -78,13 +69,14 @@ async function step(env: Env, tg: Telegram, force = false): Promise<string> {
   const [paused] = await pauseState(store);
   if (paused) return "paused";
 
-  const blockedFor = await blockSecondsLeft(store);
-  if (blockedFor > 0) return `blocked ${fmtLeft(blockedFor)}`;
+  const b = await blocks(store);
+  if (SOURCES.every((x) => b[x] > 0))
+    return `blocked (${SOURCES.map((x) => `${SITE[x]} ${fmtLeft(b[x])}`).join(", ")})`;
 
   const s = await loadSettings(store, profile);
 
   try {
-    const queued = await store.nextQueued();
+    const queued = await store.nextQueued({ wg: b.wg > 0, ka: b.ka > 0 });
     if (queued) {
       // /more deliberately overrides the hourly cap
       if (!force) {
@@ -93,53 +85,58 @@ async function step(env: Env, tg: Telegram, force = false): Promise<string> {
       }
       return await draftOne(env, tg, store, profile, queued);
     }
-    return await refreshOneCity(env, store, profile, s);
+    return await refreshOneSearch(store, profile, s, b);
   } catch (e) {
     if (e instanceof Blocked) {
-      await startBlock(store, s.block_backoff_min);
+      await startBlock(store, s.block_backoff_min, e.source);
+      const other = SITE[e.source === "wg" ? "ka" : "wg"];
       await tg.send(
-        `<b>Paused: wg-gesucht wants a captcha</b>\n\n` +
+        `<b>${SITE[e.source]} wants a bot check</b>\n\n` +
         `This is their rate limiting, not a crash, and nothing is lost — ` +
         `every ad I hadn't got to is still queued.\n\n` +
-        `<b>Trying again in ${s.block_backoff_min} minutes</b>, automatically. ` +
-        `You don't need to do anything.\n\nCountdown: /settings`);
-      return "captcha";
+        `<b>Trying ${SITE[e.source]} again in ${s.block_backoff_min} minutes</b>, ` +
+        `automatically. ${other} keeps running meanwhile.\n\nCountdown: /status`);
+      return `${SITE[e.source]} blocked`;
     }
     throw e;
   }
 }
 
-async function refreshOneCity(
-  env: Env, store: Store, profile: Profile, s: Settings,
+async function refreshOneSearch(
+  store: Store, profile: Profile, s: Settings, b: Record<Source, number>,
 ): Promise<string> {
   const searches = profile.searches ?? [];
   if (!searches.length) return "no searches configured";
 
   // The cron fires every 2 minutes, but that is the step rate, not the
-  // crawl rate. Spread one full pass over poll_minutes: with 60 minutes and
-  // 6 cities that is one listing every 10 minutes, ~6 requests an hour
-  // instead of 30. Hammering the site is what gets us captcha'd.
+  // crawl rate. Spread one full pass over poll_minutes, so each site sees a
+  // handful of requests an hour rather than dozens.
   const gap = Math.max(60, Math.floor((s.poll_minutes * 60) / searches.length));
   const last = Number((await store.kvGet("last_refresh")) ?? 0);
   const nowTs = Math.floor(Date.now() / 1000);
   if (nowTs - last < gap) {
-    return `idle (next city in ${Math.ceil((gap - (nowTs - last)) / 60)} min)`;
+    return `idle (next search in ${Math.ceil((gap - (nowTs - last)) / 60)} min)`;
   }
-  await store.kvSet("last_refresh", String(nowTs));
 
-  // round-robin so each tick touches exactly one city
-  const idx = Number((await store.kvGet("city_cursor")) ?? 0) % searches.length;
-  await store.kvSet("city_cursor", String((idx + 1) % searches.length));
+  // round-robin, stepping over any search whose site is backing off
+  let idx = Number((await store.kvGet("city_cursor")) ?? 0) % searches.length;
+  for (let i = 0; i < searches.length && b[sourceOfUrl(searches[idx].url)] > 0; i++)
+    idx = (idx + 1) % searches.length;
   const search = searches[idx];
+  const src = sourceOfUrl(search.url);
+  if (b[src] > 0) return "every search is backing off";
 
-  const html = await get(search.url, cookieJar(store));
-  const ads = parseListing(html);
+  await store.kvSet("last_refresh", String(nowTs));
+  await store.kvSet("city_cursor", String((idx + 1) % searches.length));
+
+  const html = await get(search.url, cookieJar(store, src));
+  const ads: Ad[] = src === "ka" ? kaParseListing(html) : parseListing(html);
   const seen = await store.seenMany(ads.map((a) => a.ad_id));
 
   let queued = 0;
   for (const ad of ads) {
     if (seen.has(ad.ad_id)) continue;
-    const [ok, why] = passes(ad, s);
+    const [ok, why] = check(ad, s);
     if (!ok) { await store.markFiltered(ad, why); continue; }
     await store.queue(ad, flatmates(ad));
     queued++;
@@ -150,30 +147,57 @@ async function refreshOneCity(
 async function draftOne(
   env: Env, tg: Telegram, store: Store, profile: Profile, row: AdRow,
 ): Promise<string> {
-  const html = await get(row.url, cookieJar(store));
-  const text = parseAdText(html);
+  const src = sourceOfId(row.ad_id);
+  const html = await get(row.url, cookieJar(store, src));
+
+  let text: string;
+  let details: Record<string, string> = {};
+  if (src === "ka") [text, details] = kaParseAd(html);
+  else text = parseAdText(html);
+
+  // The title passed, but the full description can still say women only.
+  // Catch it here, before paying for a draft.
+  const fem = looksFemaleOnly(text);
+  if (fem) {
+    await store.setStatus(row.ad_id, "filtered");
+    return `${row.ad_id}: women only ('${fem}'), skipped`;
+  }
   if (text.trim().length < 80) {
     await store.noteFailure(row.ad_id);
     return `${row.ad_id}: no usable ad text, requeued`;
   }
 
-  const draft = await compose(env.OPENAI_API_KEY, env.OPENAI_MODEL, profile, {
-    title: row.title, rent: row.rent, size: row.size,
-    district: row.district, text, flatmates: row.flatmates,
-  });
+  // Kleinanzeigen only reveals the flatmate count on the detail page.
+  const n = details["Anzahl Mitbewohner"] ?? "";
+  const flat = /^\d+$/.test(n) ? `WG · ${n} Mitbewohner` : row.flatmates;
+  const ready: AdRow = { ...row, flatmates: flat };
+
+  // A failure here must count as an attempt. Otherwise the ad stays queued
+  // and every 2-minute tick re-fetches the same detail page - an outage at
+  // OpenAI would turn into 30 requests an hour against one listing.
+  let draft;
+  try {
+    draft = await compose(env.OPENAI_API_KEY, env.OPENAI_MODEL, profile, {
+      title: row.title, rent: row.rent, size: row.size,
+      district: row.district, text, flatmates: flat, details,
+    });
+  } catch (e) {
+    await store.noteFailure(row.ad_id);
+    throw e;
+  }
 
   // Deliver FIRST, then mark it done. Marking first meant a failed send
   // looked like a success: the ad showed as 'pending' with a pushed_at
   // timestamp while nothing ever reached Telegram.
   try {
-    await push(tg, row, draft.language, draft.facts_used, draft.thin_ad, draft.message);
+    await push(tg, ready, draft.language, draft.facts_used, draft.thin_ad, draft.message);
   } catch (e: any) {
     // keep the draft so we don't pay OpenAI twice, but leave it queued
     await store.keepDraft(row.ad_id, draft.language, text, draft.message);
     console.error(`delivery failed for ${row.ad_id}:`, e?.message ?? e);
     throw new Error(`Telegram delivery failed: ${e?.message ?? e}`);
   }
-  await store.saveDraft(row.ad_id, draft.language, text, draft.message);
+  await store.saveDraft(row.ad_id, draft.language, text, draft.message, flat);
   return `sent ${row.ad_id}`;
 }
 
@@ -181,17 +205,22 @@ async function draftOne(
 export async function statusReport(env: Env, store: Store, profile: Profile): Promise<string> {
   const s = await loadSettings(store, profile);
   const [paused, pstate] = await pauseState(store);
-  const blockedFor = await blockSecondsLeft(store);
+  const b = await blocks(store);
   const stats = await store.stats();
   const queued = await store.countQueued();
   const sentHour = await store.pushedSince(3600);
   const last = await store.lastPushed();
 
+  const down = SOURCES.filter((x) => b[x] > 0);
   let head: string;
   if (paused) head = `⏸ <b>Paused</b> — ${pstate}. Send /start to go again.`;
-  else if (blockedFor)
-    head = `⏳ <b>Waiting out a captcha</b> — back in ${fmtLeft(blockedFor)}. Nothing for you to do.`;
+  else if (down.length === SOURCES.length)
+    head = `⏳ <b>Waiting out bot checks</b> — nothing for you to do.`;
   else head = `✅ <b>Running</b> — checking every ${s.poll_minutes} min.`;
+
+  // one line per site, so a block on one is visible without hiding the other
+  const siteLines = SOURCES.map((x) =>
+    `${SITE[x].padEnd(14)} ${b[x] > 0 ? `⏳ back in ${fmtLeft(b[x])}` : "✅ ok"}`);
 
   const ago = last
     ? `${fmtLeft(Math.max(0, Math.floor(Date.now() / 1000) - last))} ago`
@@ -201,10 +230,12 @@ export async function statusReport(env: Env, store: Store, profile: Profile): Pr
   return [
     head,
     "",
+    ...siteLines,
+    "",
     `Sent this hour:  ${sentHour} of ${s.max_per_hour}`,
     `Waiting to draft: ${queued}`,
     `Last ad sent:    ${ago}`,
-    `Cities watched:  ${(profile.searches ?? []).length}`,
+    `Searches:        ${(profile.searches ?? []).length}`,
     "",
     `Seen so far: ${seen}`,
   ].join("\n");
@@ -213,13 +244,14 @@ export async function statusReport(env: Env, store: Store, profile: Profile): Pr
 
 function header(row: AdRow, lang: string, used: string[], thin: boolean): string {
   const flag = lang === "de" ? "DE" : "EN";
+  const site = SITE[sourceOfId(row.ad_id)];
   const warn = thin ? " · <i>thin ad</i>" : "";
   const extra = used.length ? `\n<i>used: ${esc(used.join(", "))}</i>` : "";
   return (
     `<b>${esc(row.title || "Untitled")}</b>\n` +
     `${esc(row.rent || "?")} · ${esc(row.size || "?")} · ${esc(row.district || "?")}\n` +
     (row.flatmates ? `${esc(row.flatmates)}\n` : "") +
-    `written in <b>${flag}</b>${warn}${extra}\n` +
+    `written in <b>${flag}</b> · via ${site}${warn}${extra}\n` +
     `<a href="${esc(row.url)}">open the Anzeige</a>`
   );
 }
@@ -376,9 +408,10 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
     }
 
     case "/scan": {
-      const left = await blockSecondsLeft(store);
-      if (left) {
-        await reply(`Still blocked by wg-gesucht — trying again in ${fmtLeft(left)}.`);
+      const b = await blocks(store);
+      if (SOURCES.every((x) => b[x] > 0)) {
+        await reply("Both sites are backing off:\n" + SOURCES.map((x) =>
+          `${SITE[x]} — trying again in ${fmtLeft(b[x])}`).join("\n"));
         return;
       }
       const r = await step(env, tg);
@@ -403,7 +436,7 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
 
     case "/retry": {
       const n = await store.retryFailed();
-      await clearBlock(store);
+      for (const x of SOURCES) await clearBlock(store, x);
       await reply(`Cleared ${n} failed ad(s).`);
       return;
     }

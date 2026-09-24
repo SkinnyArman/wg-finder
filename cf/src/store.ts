@@ -59,26 +59,39 @@ export class Store {
       .bind(ad.ad_id, ad.url, ad.title, ad.rent, why, t, t).run();
   }
 
-  /** Oldest ad still waiting for a description + draft. */
-  async nextQueued(): Promise<AdRow | null> {
+  /**
+   * Oldest ad still waiting for a description + draft, skipping any source
+   * that is currently backing off. Kleinanzeigen ids carry a "ka-" prefix.
+   */
+  async nextQueued(skip: { wg?: boolean; ka?: boolean } = {}): Promise<AdRow | null> {
+    const src = [
+      skip.ka ? "AND ad_id NOT LIKE 'ka-%'" : "",
+      skip.wg ? "AND ad_id LIKE 'ka-%'" : "",
+    ].join(" ");
     return await this.db.prepare(
       `SELECT * FROM ads
-       WHERE status='queued' OR (status='error' AND attempts < ${MAX_ATTEMPTS})
-       ORDER BY first_seen LIMIT 1`).first<AdRow>();
+       WHERE (status='queued' OR (status='error' AND attempts < ${MAX_ATTEMPTS}))
+       ${src}
+       ORDER BY attempts, first_seen LIMIT 1`).first<AdRow>();   // failures to the back
   }
 
-  async saveDraft(adId: string, language: string, adText: string, message: string) {
+  async saveDraft(adId: string, language: string, adText: string, message: string,
+                  flatmates?: string) {
     await this.db.prepare(
       `UPDATE ads SET language=?, ad_text=?, message=?, status='pending',
-                      pushed_at=?, updated=? WHERE ad_id=?`)
-      .bind(language, adText, message, now(), now(), adId).run();
+                      flatmates=COALESCE(?, flatmates), pushed_at=?, updated=?
+       WHERE ad_id=?`)
+      .bind(language, adText, message, flatmates ?? null, now(), now(), adId).run();
   }
 
-  /** Store the generated text but leave the ad queued (delivery failed). */
+  /**
+   * Delivery failed: keep the generated text, count the attempt. Leaving it
+   * plainly 'queued' would retry every tick forever.
+   */
   async keepDraft(adId: string, language: string, adText: string, message: string) {
     await this.db.prepare(
-      `UPDATE ads SET language=?, ad_text=?, message=?, status='queued',
-                      pushed_at=NULL, updated=? WHERE ad_id=?`)
+      `UPDATE ads SET language=?, ad_text=?, message=?, status='error',
+                      attempts=attempts+1, pushed_at=NULL, updated=? WHERE ad_id=?`)
       .bind(language, adText, message, now(), adId).run();
   }
 

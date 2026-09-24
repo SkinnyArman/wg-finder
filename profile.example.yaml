@@ -86,6 +86,8 @@ behaviour:
 searches:
   - name: "Cottbus"
     url: "https://www.wg-gesucht.de/wg-zimmer-in-Cottbus.22.0.1.0.html"
+  - name: "Kleinanzeigen Cottbus + surroundings (offers only)"
+    url: "https://www.kleinanzeigen.de/s-auf-zeit-wg/cottbus/anzeige:angebote/c199l7743"
   - name: "Senftenberg (BTU 2nd campus, ~26-33 min by train)"
     url: "https://www.wg-gesucht.de/wg-zimmer-in-Senftenberg.473.0.1.0.html"
   - name: "Forst (Lausitz) (~18-20 min, RB46)"

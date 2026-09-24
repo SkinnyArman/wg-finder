@@ -3,7 +3,6 @@ import asyncio
 import functools
 import html
 import re
-import time
 import logging
 import os
 import random
@@ -17,7 +16,7 @@ from telegram.constants import ParseMode
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes)
 
-from . import settings, store
+from . import filters, settings, store
 from .scraper import Blocked, WGClient
 from .writer import Writer
 
@@ -84,37 +83,9 @@ def owner_only(fn):
 
 
 # ----------------------------- filtering -----------------------------
-PENDLER_WORDS = ("pendler", "pendlerin", "pendler*in", "wochenend",
-                 "zwischenmiete", "nur unter der woche", "mo-do", "mo - do",
-                 "monday to thursday", "weekdays only", "commuter")
-
-
 def passes_filters(ad) -> tuple[bool, str]:
-    f = settings.load()
-    title = (ad.title or "").lower()
-
-    for bad in f.get("skip_if_title_contains") or []:
-        if bad.lower() in title:
-            return False, f"title contains '{bad}'"
-    req = f.get("require_title_contains") or []
-    if req and not any(r.lower() in title for r in req):
-        return False, "missing required keyword"
-
-    if f.get("skip_female_only", True) and ad.seeking == "female":
-        return False, "WG wants a woman"
-
-    if f.get("skip_pendler", True):
-        for wd in PENDLER_WORDS:
-            if wd in title:
-                return False, f"Pendler room ('{wd}')"
-
-    rent = ad.rent_eur
-    if rent is not None:
-        if f.get("max_rent") and rent > f["max_rent"]:
-            return False, f"{rent} EUR over max"
-        if f.get("min_rent") and rent < f["min_rent"]:
-            return False, f"{rent} EUR under min"
-    return True, ""
+    return filters.check(title=ad.title, snippet=ad.snippet, rent=ad.rent,
+                         seeking=ad.seeking, settings=settings.load())
 
 
 # ----------------------------- telegram UI -----------------------------
@@ -223,6 +194,80 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int]:
                 f"I'll try again at the next check. Queued ads are safe.",
                 parse_mode=ParseMode.HTML)
             return "error", 0
+
+
+async def _scan_once(app) -> int:
+    """One scan. Returns how many ads were actually sent."""
+    sent = 0
+    async with WGClient() as c:
+        global _tick
+        _tick += 1
+        searches = CFG.get("searches") or []
+        # The outlying towns get a handful of ads a month, so only the first
+        # search is checked every tick; the rest roughly every 4th.
+        if _tick % 4 != 1 and len(searches) > 1:
+            searches = searches[:1]
+
+        fresh = []
+        for search in searches:
+            if _cancel:
+                log.info("Scan cancelled by /pause.")
+                return sent
+            name = search.get("name", search["url"])
+            ads = await c.fetch_listing(search["url"])
+            log.info("%-45s %d ad(s)", name, len(ads))
+            for ad in ads:
+                if store.seen(ad.ad_id):
+                    continue
+                ok, why = passes_filters(ad)
+                if not ok:
+                    log.info("  filtered %s (%s)", ad.ad_id, why)
+                    store.record(ad.ad_id, url=ad.url, title=ad.title,
+                                 rent=ad.rent, status="filtered")
+                    continue
+                fresh.append(ad)
+
+        global _burst
+        max_per_hour = settings.load()["max_per_hour"]
+        budget = max(0, max_per_hour - store.pushed_since(3600)) + _burst
+        _burst = 0
+        if len(fresh) > budget:
+            log.info("%d new ad(s); sending %d (limit %d/hour). Rest stay queued.",
+                     len(fresh), budget, max_per_hour)
+        else:
+            log.info("%d new ad(s) to write for", len(fresh))
+        if budget == 0:
+            return sent
+
+        for ad in fresh[:budget]:
+            if _cancel:
+                log.info("Scan cancelled by /pause - remaining ads stay queued.")
+                return sent
+            try:
+                await c.fetch_ad_text(ad)
+                fem = filters.looks_female_only(ad.text)
+                if fem:
+                    log.info("skipping %s: description says women only (%r)", ad.ad_id, fem)
+                    store.record(ad.ad_id, url=ad.url, title=ad.title,
+                                 rent=ad.rent, status="filtered")
+                    continue
+                if len((ad.text or "").strip()) < 80:
+                    # usually a bot check on the detail page. Drafting from an
+                    # empty ad produces a generic message, so requeue instead.
+                    log.warning("skipping %s: no usable ad text", ad.ad_id)
+                    store.note_failure(ad.ad_id, ad.url, ad.title)
+                    continue
+                draft = await writer.compose(ad)
+                await _push(app, ad, draft)
+                sent += 1
+            except Blocked:
+                raise            # the whole scan is over; let scan() handle it
+            except Exception:
+                log.exception("ad %s failed", ad.ad_id)
+                store.note_failure(ad.ad_id, ad.url, ad.title)
+            await asyncio.sleep(random.uniform(3, 7))
+
+    return sent
 
 
 # ----------------------------- handlers -----------------------------

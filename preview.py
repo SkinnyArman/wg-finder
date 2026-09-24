@@ -28,18 +28,9 @@ DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
 
 
 def passes(ad):
-    f = CFG.get("filters", {}) or {}
-    t = (ad.title or "").lower()
-    for bad in f.get("skip_if_title_contains") or []:
-        if bad.lower() in t:
-            return False, f"title: {bad}"
-    r = ad.rent_eur
-    if r is not None:
-        if f.get("max_rent") and r > f["max_rent"]:
-            return False, f"{r} EUR over max"
-        if f.get("min_rent") and r < f["min_rent"]:
-            return False, f"{r} EUR under min"
-    return True, ""
+    from wgfinder import filters, settings
+    return filters.check(title=ad.title, snippet=ad.snippet, rent=ad.rent,
+                         seeking=ad.seeking, settings=settings.load())
 
 
 async def main():

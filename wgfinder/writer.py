@@ -110,6 +110,15 @@ def _profile_block(profile: dict) -> str:
     return "\n".join(L)
 
 
+def _details_block(ad) -> str:
+    """Structured facts some sites give (Kleinanzeigen: 'Verfügbar ab' etc.).
+    'Verfügbar ab' matters most - the move-in rule reads it."""
+    det = (getattr(ad, "meta", None) or {}).get("details") or {}
+    if not det:
+        return ""
+    return "Listing facts:\n" + "\n".join(f"  {k}: {v}" for k, v in det.items())
+
+
 class Writer:
     def __init__(self, api_key: str, model: str, profile: dict):
         self.client = AsyncOpenAI(api_key=api_key)
@@ -130,6 +139,7 @@ class Writer:
             Size: {ad.size}
             Area: {ad.district}
             Flat: {getattr(ad, "flatmates", "") or "not stated"}
+            {_details_block(ad)}
 
             Description:
             {ad_text or "(no description text could be extracted)"}

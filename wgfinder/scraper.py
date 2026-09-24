@@ -14,6 +14,10 @@ from pathlib import Path
 import httpx
 from html import unescape as _unescape
 
+from .kleinanzeigen import (is_blocked as ka_is_blocked,
+                            parse_ad as ka_parse_ad,
+                            parse_listing as ka_parse_listing)
+
 from bs4 import BeautifulSoup
 
 log = logging.getLogger("scraper")
@@ -62,11 +66,15 @@ class Ad:
     women: int = 0
     men: int = 0
     diverse: int = 0
+    snippet: str = ""       # listing teaser, used by the filters
+    source: str = "wg"      # 'wg' (wg-gesucht) | 'ka' (Kleinanzeigen)
     text: str = ""
     meta: dict = field(default_factory=dict)
 
     @property
     def flatmates(self) -> str:
+        if self.source == "ka":
+            return self.meta.get("flatmates_note", "")
         """e.g. '5er WG \u00b7 \U0001f469\u00d72 \U0001f468\u00d72'. Empty when the ad gives no info."""
         if not self.wg_size:
             return ""
@@ -92,6 +100,13 @@ class Ad:
             return int(m.group(1).replace(".", ""))
         except ValueError:
             return None
+
+
+def _ka_to_ad(d: dict) -> "Ad":
+    return Ad(ad_id=d["ad_id"], url=d["url"], title=d["title"], rent=d["rent"],
+              district=d["district"], size=d["size"], image=d["image"],
+              snippet=d["snippet"], source="ka",
+              meta={"commercial": d["commercial"], "rooms": d["rooms"]})
 
 
 class WGClient:
@@ -120,12 +135,15 @@ class WGClient:
                 log.warning("request error %s (%s)", e, url)
                 continue
             if r.status_code == 200:
-                if _is_captcha(r.text):
-                    self._dump(r.text, "captcha")
+                ka = "kleinanzeigen.de" in url
+                if (ka_is_blocked(r.text) if ka else _is_captcha(r.text)):
+                    self._dump(r.text, "captcha-ka" if ka else "captcha")
                     raise Blocked(
-                        "wg-gesucht is showing its verification captcha. "
-                        "Too many requests - back off and try later.")
+                        f"{'Kleinanzeigen' if ka else 'wg-gesucht'} is showing a "
+                        "bot check. Too many requests - back off and try later.")
                 return r.text
+            if r.status_code == 403 and "kleinanzeigen.de" in url:
+                raise Blocked("Kleinanzeigen refused the request (403, Akamai).")
             # 404 here is usually a soft rate-limit, not a dead page
             wait = 20 * (attempt + 1)
             log.warning("HTTP %s on %s - backing off %ss", r.status_code, url, wait)
@@ -136,6 +154,8 @@ class WGClient:
         html = await self._get(url)
         if html is None:
             return []
+        if "kleinanzeigen.de" in url:
+            return [_ka_to_ad(d) for d in ka_parse_listing(html)]
         ads = parse_listing(html)
         if not ads and not _genuinely_empty(html):
             self._dump(html, "empty-listing")
@@ -145,6 +165,13 @@ class WGClient:
     async def fetch_ad_text(self, ad: Ad) -> Ad:
         html = await self._get(ad.url)
         if html is None:
+            return ad
+        if ad.source == "ka":
+            ad.text, details = ka_parse_ad(html)
+            ad.meta["details"] = details
+            n = details.get("Anzahl Mitbewohner", "")
+            if n.isdigit():
+                ad.meta["flatmates_note"] = f"WG · {n} Mitbewohner"
             return ad
         ad.text = parse_ad_text(html)
         ad.meta.update(parse_ad_meta(html))

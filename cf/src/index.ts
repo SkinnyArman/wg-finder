@@ -498,10 +498,18 @@ async function handleButton(
 
   if (action === "ok") {
     await store.setStatus(adId, "approved");
-    await tg.answerCallback(cq.id, "Here you go");
-    await tg.clearKeyboard(chat, msgId);
-    await tg.send(`<pre>${esc(row.message ?? "")}</pre>`, {}, String(chat));
-    await tg.send(`Paste it here: ${row.url}`, {}, String(chat));
+    await tg.answerCallback(cq.id, "Approved ✅");
+    // Stamp the draft in place rather than posting anything new: it is
+    // already a tap-to-copy block, and the ad link is in the card above.
+    // Prefer the text as shown; Telegram omits it on messages it considers
+    // inaccessible (very old ones), so fall back to the stored draft.
+    const shown: string = cq.message?.text ?? row.message ?? "";
+    try {
+      // an empty keyboard removes the buttons in the same call
+      await tg.editText(chat, msgId, `<pre>${esc(shown)}</pre>\n\n<b>Approved ✅</b>`, []);
+    } catch (e: any) {
+      console.error(`approve edit failed for ${adId}:`, e?.message ?? e);
+    }
     return;
   }
 

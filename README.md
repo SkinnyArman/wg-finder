@@ -1,9 +1,10 @@
 # WG-Gesucht watcher (Cottbus)
 
-Checks your WG-Gesucht searches every ~10 minutes, reads each new Anzeige,
+Checks your WG-Gesucht and Kleinanzeigen searches, reads each new Anzeige,
 drafts a reply in the ad's own language, and sends it to you on Telegram.
-You tap **Approve** and it hands you the finished text plus the link — you
-paste it yourself. Nothing is ever sent to a landlord automatically.
+You tap **Approve**, the draft gets stamped "Approved ✅", and you copy it
+from there and paste it yourself. Nothing is ever sent to a landlord
+automatically.
 
 ## No WG-Gesucht login needed
 
@@ -82,8 +83,9 @@ to catch new posts. To add one, search it on the site and copy the URL.
 | `/stats` | What it has seen so far |
 | `/retry` | Re-draft ads that errored |
 
-Per ad: **Approve** (hands you the text to paste), **Rewrite** (different
-angle, costs one more API call), **Skip** (never shown again).
+Per ad: **Approve** (stamps the draft "Approved ✅" in place, no new
+messages — copy it from there), **Rewrite** (different angle, costs one more
+API call), **Skip** (never shown again).
 
 Timing lives in `/settings`, not in `.env` — change the check interval from
 Telegram and the schedule updates immediately, no restart. Defaults are in the

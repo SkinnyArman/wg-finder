@@ -346,14 +346,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "ok":
         store.set_status(ad_id, "approved")
-        await q.answer("Here you go")
-        await q.edit_message_reply_markup(reply_markup=None)
-        # Clean, tap-to-copy block plus the link to paste it into.
-        await q.message.reply_text(
-            f"<pre>{html.escape(row['message'])}</pre>",
-            parse_mode=ParseMode.HTML)
-        await q.message.reply_text(f"Paste it here: {row['url']}",
-                                   disable_web_page_preview=True)
+        await q.answer("Approved ✅")
+        # Stamp the draft in place rather than posting anything new: it is
+        # already a tap-to-copy block, and the ad link is in the card above.
+        # Very old messages come back without text, so fall back to the DB.
+        shown = getattr(q.message, "text", None) or row["message"] or ""
+        try:
+            # editing without reply_markup also removes the buttons
+            await q.edit_message_text(
+                f"<pre>{html.escape(shown)}</pre>\n\n<b>Approved ✅</b>",
+                parse_mode=ParseMode.HTML)
+        except Exception as e:
+            log.warning("approve edit failed for %s: %s", ad_id, e)
         return
 
     if action == "re":

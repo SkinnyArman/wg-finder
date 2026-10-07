@@ -72,6 +72,7 @@ to catch new posts. To add one, search it on the site and copy the URL.
 
 | Command | What it does |
 |---|---|
+| `/review` | Go through ads you were sent but never answered, one at a time: Approve / Skip / Later / Stop |
 | `/pause` | Stop searching. `/pause 2h` stops for a while |
 | `/resume` | Start again |
 | `/more [n]` | Send n more now, ignoring the hourly cap (default 5) |

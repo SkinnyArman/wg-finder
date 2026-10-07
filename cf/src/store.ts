@@ -126,6 +126,45 @@ export class Store {
     return r?.t ?? 0;
   }
 
+  // ---- review: ads sent to the user that were never approved or skipped.
+  // Ordered by when they were sent (ad_id breaks ties), so "the one after
+  // this" stays well defined while the user defers some with "Later".
+
+  async countPending(): Promise<number> {
+    const r = await this.db.prepare("SELECT COUNT(*) AS n FROM ads WHERE status='pending'")
+      .first<{ n: number }>();
+    return r?.n ?? 0;
+  }
+
+  /** Oldest undecided ad, or the first one after `afterId` in review order. */
+  async nextPending(afterId?: string): Promise<AdRow | null> {
+    if (!afterId) {
+      return await this.db.prepare(
+        `SELECT * FROM ads WHERE status='pending'
+         ORDER BY COALESCE(pushed_at, updated), ad_id LIMIT 1`).first<AdRow>();
+    }
+    return await this.db.prepare(
+      `SELECT a.* FROM ads a,
+         (SELECT COALESCE(pushed_at, updated) AS t, ad_id FROM ads WHERE ad_id=?) cur
+       WHERE a.status='pending'
+         AND (COALESCE(a.pushed_at, a.updated) > cur.t
+              OR (COALESCE(a.pushed_at, a.updated) = cur.t AND a.ad_id > cur.ad_id))
+       ORDER BY COALESCE(a.pushed_at, a.updated), a.ad_id LIMIT 1`)
+      .bind(afterId).first<AdRow>();
+  }
+
+  /** 1-based position of an ad among the undecided ones. */
+  async pendingPosition(adId: string): Promise<number> {
+    const r = await this.db.prepare(
+      `SELECT COUNT(*) AS n FROM ads a,
+         (SELECT COALESCE(pushed_at, updated) AS t, ad_id FROM ads WHERE ad_id=?) cur
+       WHERE a.status='pending'
+         AND (COALESCE(a.pushed_at, a.updated) < cur.t
+              OR (COALESCE(a.pushed_at, a.updated) = cur.t AND a.ad_id < cur.ad_id))`)
+      .bind(adId).first<{ n: number }>();
+    return (r?.n ?? 0) + 1;
+  }
+
   async countQueued(): Promise<number> {
     const r = await this.db.prepare(
       `SELECT COUNT(*) AS n FROM ads

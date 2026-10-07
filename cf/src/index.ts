@@ -236,6 +236,7 @@ export async function statusReport(env: Env, store: Store, profile: Profile): Pr
     `Waiting to draft: ${queued}`,
     `Last ad sent:    ${ago}`,
     `Searches:        ${(profile.searches ?? []).length}`,
+    ...(stats.pending ? [`Waiting on you:  ${stats.pending}  → /review`] : []),
     "",
     `Seen so far: ${seen}`,
   ].join("\n");
@@ -255,6 +256,46 @@ function header(row: AdRow, lang: string, used: string[], thin: boolean): string
     `<a href="${esc(row.url)}">open the Anzeige</a>`
   );
 }
+
+// ------------------------------------------------------------- review
+// /review walks through ads that were sent but never approved or skipped.
+
+function sentAgo(ts: number | null): string {
+  if (!ts) return "";
+  const m = Math.max(0, Math.floor((Date.now() / 1000 - ts) / 60));
+  if (m < 60) return ` · sent ${m} min ago`;
+  const h = Math.floor(m / 60);
+  return h < 48 ? ` · sent ${h}h ago` : ` · sent ${Math.floor(h / 24)} days ago`;
+}
+
+/** The ad and its draft as one message (the draft stays tap-to-copy). */
+function adBlock(row: AdRow): string {
+  const draft = (row.message ?? "(no draft stored)").slice(0, 3200);  // 4096 cap
+  return (
+    `<b>${esc(row.title || "Untitled")}</b>\n` +
+    `${esc(row.rent || "?")} · ${esc(row.size || "?")} · ${esc(row.district || "?")}\n` +
+    (row.flatmates ? `${esc(row.flatmates)}\n` : "") +
+    `via ${SITE[sourceOfId(row.ad_id)]} · <a href="${esc(row.url)}">open the Anzeige</a>\n\n` +
+    `<pre>${esc(draft)}</pre>`
+  );
+}
+
+async function reviewCard(store: Store, row: AdRow): Promise<string> {
+  const pos = await store.pendingPosition(row.ad_id);
+  const total = await store.countPending();
+  return `🗂 <b>Review ${pos} of ${total}</b>${sentAgo(row.pushed_at)}\n\n` + adBlock(row);
+}
+
+const reviewKeyboard = (id: string): Button[][] => [
+  [{ text: "Approve ✅", callback_data: `rv:ok:${id}` },
+   { text: "Skip ⏭", callback_data: `rv:no:${id}` }],
+  [{ text: "Later ⏸", callback_data: `rv:later:${id}` },
+   { text: "Stop", callback_data: `rv:stop:${id}` }],
+];
+
+const reviewDone = (left: number) => left
+  ? `Done for now — ${left} you put off with Later are still waiting. /review to go through them again.`
+  : "✅ All caught up — nothing left to decide.";
 
 const adKeyboard = (id: string): Button[][] => [[
   { text: "Approve", callback_data: `ok:${id}` },
@@ -346,9 +387,20 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
       if (wasPaused) await resume(store);
       const note = wasPaused ? "Started.\n\n" : "";
       await reply(note + (await statusReport(env, store, profile)) +
-        `\n\n/status — is it running\n/pause [2h] — stop it\n` +
+        `\n\n/status — is it running\n/review — decide on ads you haven't answered\n` +
+        `/pause [2h] — stop it\n` +
         `/scan — check now\n/more [n] — send more now\n` +
         `/filters — which ads qualify\n/settings — timing\n/stats — totals`);
+      return;
+    }
+
+    case "/review": {
+      const first = await store.nextPending();
+      if (!first) {
+        await reply("Nothing waiting on you — every ad you were sent is approved or skipped.");
+        return;
+      }
+      await reply(await reviewCard(store, first), tg.keyboard(reviewKeyboard(first.ad_id)));
       return;
     }
 
@@ -359,6 +411,7 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
     case "/help":
       await reply(
         `/start — start it (also un-pauses)\n/status — is it running\n` +
+        `/review — decide on ads you haven't answered\n` +
         `/pause [2h] — stop it\n/scan — check now\n/more [n] — send more now\n` +
         `/filters — which ads qualify\n/settings — timing\n` +
         `/stats — totals\n/retry — re-draft failed`);
@@ -479,6 +532,40 @@ async function handleButton(
       : await filtersSummary(store, profile);
     const kb = isSettings ? settingsKeyboard(s, p) : filtersKeyboard(s);
     try { await tg.editText(chat, msgId, body, kb); } catch { /* unchanged */ }
+    return;
+  }
+
+  if (data.startsWith("rv:")) {
+    // ad ids never contain ":" (wg-gesucht digits, Kleinanzeigen "ka-" + digits)
+    const [, act, adId] = data.split(":");
+    if (act === "stop") {
+      await tg.answerCallback(cq.id, "Review stopped");
+      await tg.editText(chat, msgId,
+        `Review stopped — ${await store.countPending()} still waiting on you. /review to continue.`, []);
+      return;
+    }
+    const row = await store.get(adId);
+    if (!row) {
+      await tg.answerCallback(cq.id, "Unknown ad.");
+      return;
+    }
+    if (act === "ok") await store.setStatus(adId, "approved");
+    if (act === "no") await store.setStatus(adId, "skipped");
+
+    const next = await store.nextPending(adId);
+    const toast = act === "ok" ? "Approved ✅" : act === "no" ? "Skipped" : "Later";
+    await tg.answerCallback(cq.id, next ? toast : `${toast} — that was the last one`);
+
+    if (act === "ok") {
+      // Keep the approved draft right here to copy; the next ad gets its own card.
+      await tg.editText(chat, msgId, adBlock(row) + "\n\n<b>Approved ✅</b>", []);
+      if (next)
+        await tg.send(await reviewCard(store, next), tg.keyboard(reviewKeyboard(next.ad_id)), String(chat));
+      return;
+    }
+    // Skip / Later: turn this same message into the next ad - nothing new posted.
+    if (next) await tg.editText(chat, msgId, await reviewCard(store, next), reviewKeyboard(next.ad_id));
+    else await tg.editText(chat, msgId, reviewDone(await store.countPending()), []);
     return;
   }
 

@@ -70,6 +70,8 @@ STEP 4 - HOW IT MUST SOUND
   delighted", no "please do not hesitate".
 - Contractions are good. "I'm", "I'd", "ich bin".
 - German: use "du/ihr" if the ad does, otherwise "Sie". Match their register.
+  A Hausverwaltung, landlord or company is ALWAYS "Sie" with "Guten Tag",
+  even if the ad itself is chatty - never "ihr" or "Hallo" to a company.
 - Obey every rule in `never` without exception.
 - Stay inside the length in STYLE: paragraph 1 at most ~35 words, paragraph
   2 the longest, paragraph 3 at most ~30 words. When cutting, keep the

@@ -35,6 +35,8 @@ function profileBlock(p: Profile): string {
   L.push("\n--- NEVER (hard rules) ---");
   for (const f of a.never ?? []) L.push(`  ! ${String(f).replace(/\s+/g, " ")}`);
 
+  if (a.whatsapp)
+    L.push(`\n--- WHATSAPP ---\nEnd the message with: reachable on WhatsApp at ${a.whatsapp}`);
   if (a.move_in_rule)
     L.push(`\n--- MOVE-IN RULE ---\n${String(a.move_in_rule).replace(/\s+/g, " ")}`);
 
@@ -61,6 +63,7 @@ export async function compose(
 
   let user =
     `${profileBlock(profile)}\n\n` +
+    `TODAY: ${new Date().toISOString().slice(0, 10)}\n\n` +
     `=== THE ANZEIGE ===\n` +
     `Title: ${ad.title}\nRent: ${ad.rent}\nSize: ${ad.size}\n` +
     `Area: ${ad.district}\nFlat: ${ad.flatmates || "not stated"}\n` +

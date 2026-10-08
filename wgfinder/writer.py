@@ -1,7 +1,7 @@
 """Reads an Anzeige, detects its language, writes a reply in that language."""
 import json
 import logging
-import textwrap
+from datetime import date
 
 from openai import AsyncOpenAI, BadRequestError
 
@@ -26,24 +26,34 @@ list of hobbies and fails.
 
 STEP 3 - STRUCTURE (follow this order)
 
-Paragraph 1 - INTRODUCE HIMSELF FIRST.
-  Open with who he is. Name, age, and that he is moving to Cottbus to start
-  at the university. A greeting, then straight into
-  "I'm <name>, I'm <age>, and I'm moving to <city> to start ...".
+Paragraph 1 - INTRODUCE HIMSELF FIRST: ONE OR TWO SENTENCES, AT MOST ~35 WORDS.
+  A greeting, then straight into who he is: name, age, moving to Cottbus to
+  start at the university, his work and that rent is covered. Fold the
+  habit and language facts in as short clauses ("Nichtraucher, keine
+  Haustiere", "habe das telc-C1-Zertifikat") - never one sentence per fact.
+  His temperament and respect for house rules do NOT go here.
+  This is an introduction, not a form being filled in.
   NEVER open with a detached observation about the room. NEVER open with
   "The quiet, practical room sounds ideal" or similar floating commentary -
   there is no subject in that sentence and it reads as confusing.
   NEVER open with "I saw your ad" / "Ich habe eure Anzeige gesehen".
 
-Paragraph 2 - WHY THIS FLAT.
-  Now bring in the ad. Name something concrete from it (the balcony, that
+Paragraph 2 - WHY THIS FLAT: THE LONGEST PARAGRAPH, AT LEAST ~40 WORDS.
+  Now bring in the ad. Name TWO concrete things from it (the balcony, that
   they cook together, the cat, the Altbau, that they want someone social)
-  and say something real about why it appeals. This is where any
-  if_relevant / contextual fact goes, if one fits.
+  and say something real about why they appeal. "The room and location
+  sound great" is generic and fails. His temperament and respect for house
+  rules go here as ONE clause tied to what they wrote - e.g. they say
+  they're often out, so a quiet flatmate who still joins for a kitchen chat
+  fits. Any if_relevant / contextual fact also goes here, if one fits.
 
 Paragraph 3 - PRACTICALITIES AND CLOSE.
   Move-in date (ONCE - never state a date twice, never give two different
-  dates), then offer the video call. Sign off.
+  dates), then a concrete way to meet, using TODAY from the input: before
+  he arrives, a video call now and an in-person viewing from his arrival
+  date; once he has arrived, that he is in Cottbus and can come by any time.
+  If a WhatsApp number is given, end with it as the easiest way to reach
+  him. Sign off.
 
 STEP 4 - HOW IT MUST SOUND
 - Warm and relaxed, like a friendly person writing to people he would like
@@ -61,6 +71,10 @@ STEP 4 - HOW IT MUST SOUND
 - Contractions are good. "I'm", "I'd", "ich bin".
 - German: use "du/ihr" if the ad does, otherwise "Sie". Match their register.
 - Obey every rule in `never` without exception.
+- Stay inside the length in STYLE: paragraph 1 at most ~35 words, paragraph
+  2 the longest, paragraph 3 at most ~30 words. When cutting, keep the
+  paragraph about their flat - it is what gets a reply - and trim the facts
+  about him.
 - If the ad is too bare to react to, set thin_ad true and write SHORTER.
   Never pad with adjectives.
 
@@ -95,6 +109,8 @@ def _profile_block(profile: dict) -> str:
     for f in a.get("never") or []:
         L.append(f"  ! {' '.join(f.split())}")
 
+    if a.get("whatsapp"):
+        L.append(f"\n--- WHATSAPP ---\nEnd the message with: reachable on WhatsApp at {a['whatsapp']}")
     if a.get("move_in_rule"):
         L.append(f"\n--- MOVE-IN RULE ---\n{' '.join(a['move_in_rule'].split())}")
 
@@ -130,20 +146,19 @@ class Writer:
         if len(ad_text) > 6000:
             ad_text = ad_text[:6000] + "\n[...truncated]"
 
-        user = textwrap.dedent(f"""\
-            {_profile_block(self.profile)}
-
-            === THE ANZEIGE ===
-            Title: {ad.title}
-            Rent: {ad.rent}
-            Size: {ad.size}
-            Area: {ad.district}
-            Flat: {getattr(ad, "flatmates", "") or "not stated"}
-            {_details_block(ad)}
-
-            Description:
-            {ad_text or "(no description text could be extracted)"}
-            """)
+        # Built line by line: textwrap.dedent can't strip the indent once the
+        # multi-line profile block is interpolated, so the ad section used to
+        # go out indented by 12 spaces. Mirrors cf/src/writer.ts.
+        user = (
+            f"{_profile_block(self.profile)}\n\n"
+            f"TODAY: {date.today().isoformat()}\n\n"
+            "=== THE ANZEIGE ===\n"
+            f"Title: {ad.title}\nRent: {ad.rent}\nSize: {ad.size}\n"
+            f"Area: {ad.district}\n"
+            f"Flat: {getattr(ad, 'flatmates', '') or 'not stated'}\n"
+            f"{_details_block(ad)}\n"
+            f"Description:\n{ad_text or '(no description text could be extracted)'}\n"
+        )
         if retry_note:
             user += f"\n=== REWRITE REQUEST ===\n{retry_note}\n"
 

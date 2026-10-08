@@ -13,12 +13,14 @@ about:
   name: "Your name"
   age: 25
   pronouns: "he/him   # or she/her, they/them"
+  whatsapp: ""          # filled in -> every message ends with it
 
   always:
     - "his name is X, he is 25"
     - "non-smoker, no pets"
     - "will be a student at <university>"
-    - "fluent in English; German around B1/B2 and actively improving"
+    - "fluent in English; <your German level - a certificate if you have one>"
+    - "<how rent is covered: your job, a blocked account, ...>"
     - "describe your temperament as BEHAVIOUR, not adjectives -
        e.g. quiet on weeknights, happy to sit in the kitchen and talk"
     - "respects house rules and gives people their space"
@@ -55,7 +57,7 @@ about:
 #  STYLE
 # ============================================================
 style:
-  length: "140-200 words"
+  length: "90-120 words"
   tone: >
     Friendly, warm and relaxed - he is writing to people he would like to live
     with, not to a landlord or an employer. Contractions throughout. Vary the

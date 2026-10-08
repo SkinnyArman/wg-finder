@@ -108,26 +108,28 @@ async function refreshOneSearch(
   const searches = profile.searches ?? [];
   if (!searches.length) return "no searches configured";
 
-  // The cron fires every 2 minutes, but that is the step rate, not the
-  // crawl rate. Spread one full pass over poll_minutes, so each site sees a
-  // handful of requests an hour rather than dozens.
-  const gap = Math.max(60, Math.floor((s.poll_minutes * 60) / searches.length));
-  const last = Number((await store.kvGet("last_refresh")) ?? 0);
+  // Weighted checking. Each search keeps its own "last checked" time; busy
+  // ones (hot: true) are due every hot_minutes, quiet ones every
+  // poll_minutes. A tick fetches at most one listing - the most overdue - so
+  // the cron's 2-minute rate stays the ceiling, not the crawl rate. Keyed by
+  // URL, so reordering the searches in the profile doesn't reset anything.
   const nowTs = Math.floor(Date.now() / 1000);
-  if (nowTs - last < gap) {
-    return `idle (next search in ${Math.ceil((gap - (nowTs - last)) / 60)} min)`;
+  const checked = await store.kvPrefix("checked:");
+  let pick = -1, mostOverdue = -1, soonest = Infinity;
+  searches.forEach((sr, i) => {
+    if (b[sourceOfUrl(sr.url)] > 0) return;                 // site backing off
+    const every = (sr.hot ? s.hot_minutes : s.poll_minutes) * 60;
+    const due = Number(checked["checked:" + sr.url] ?? 0) + every;
+    if (due <= nowTs && nowTs - due > mostOverdue) { mostOverdue = nowTs - due; pick = i; }
+    soonest = Math.min(soonest, due);
+  });
+  if (pick < 0) {
+    if (soonest === Infinity) return "every search is backing off";
+    return `idle (next check in ${Math.max(1, Math.ceil((soonest - nowTs) / 60))} min)`;
   }
-
-  // round-robin, stepping over any search whose site is backing off
-  let idx = Number((await store.kvGet("city_cursor")) ?? 0) % searches.length;
-  for (let i = 0; i < searches.length && b[sourceOfUrl(searches[idx].url)] > 0; i++)
-    idx = (idx + 1) % searches.length;
-  const search = searches[idx];
+  const search = searches[pick];
   const src = sourceOfUrl(search.url);
-  if (b[src] > 0) return "every search is backing off";
-
-  await store.kvSet("last_refresh", String(nowTs));
-  await store.kvSet("city_cursor", String((idx + 1) % searches.length));
+  await store.kvSet("checked:" + search.url, String(nowTs));
 
   const html = await get(search.url, cookieJar(store, src));
   const ads: Ad[] = src === "ka" ? kaParseListing(html) : parseListing(html);
@@ -216,7 +218,16 @@ export async function statusReport(env: Env, store: Store, profile: Profile): Pr
   if (paused) head = `⏸ <b>Paused</b> — ${pstate}. Send /start to go again.`;
   else if (down.length === SOURCES.length)
     head = `⏳ <b>Waiting out bot checks</b> — nothing for you to do.`;
-  else head = `✅ <b>Running</b> — checking every ${s.poll_minutes} min.`;
+  else {
+    const all = profile.searches ?? [];
+    const hot = all.filter((x) => x.hot).length;
+    const quiet = all.length - hot;
+    const hrs = (m: number) => (m % 60 === 0 && m >= 60 ? `${m / 60} h` : `${m} min`);
+    head = `✅ <b>Running</b> — ` + [
+      hot ? `${hot} busy search${hot > 1 ? "es" : ""} every ${hrs(s.hot_minutes)}` : "",
+      quiet ? `${quiet} quiet one${quiet > 1 ? "s" : ""} every ${hrs(s.poll_minutes)}` : "",
+    ].filter(Boolean).join(", ") + ".";
+  }
 
   // one line per site, so a block on one is visible without hiding the other
   const siteLines = SOURCES.map((x) =>
@@ -330,9 +341,12 @@ function parseDuration(t: string): number | null {
 const settingsKeyboard = (s: Settings, paused: boolean): Button[][] => [
   [{ text: paused ? "Resume searching" : "Pause searching",
      callback_data: paused ? "set:resume" : "set:pause" }],
-  [{ text: "-5 min", callback_data: "set:poll_minutes:-5" },
-   { text: `every ${s.poll_minutes} min`, callback_data: "set:noop" },
-   { text: "+5 min", callback_data: "set:poll_minutes:+5" }],
+  [{ text: "-5 min", callback_data: "set:hot_minutes:-5" },
+   { text: `busy every ${s.hot_minutes} min`, callback_data: "set:noop" },
+   { text: "+5 min", callback_data: "set:hot_minutes:+5" }],
+  [{ text: "-30 min", callback_data: "set:poll_minutes:-30" },
+   { text: `quiet every ${s.poll_minutes} min`, callback_data: "set:noop" },
+   { text: "+30 min", callback_data: "set:poll_minutes:+30" }],
   [{ text: "-1", callback_data: "set:max_per_hour:-1" },
    { text: `${s.max_per_hour} ads/hour`, callback_data: "set:noop" },
    { text: "+1", callback_data: "set:max_per_hour:+1" }],

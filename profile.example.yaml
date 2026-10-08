@@ -76,7 +76,8 @@ style:
 #  /settings; overrides are saved to filters.local.json.
 # ============================================================
 behaviour:
-  poll_minutes: 60        # how often to check (5-180)
+  hot_minutes: 15        # searches marked hot: true (5-120)
+  poll_minutes: 180      # every other search (15-720)
   max_per_hour: 2         # most ads sent to you per hour (1-20)
   block_backoff_min: 45   # pause this long if wg-gesucht shows a captcha
 
@@ -88,8 +89,10 @@ behaviour:
 searches:
   - name: "Cottbus"
     url: "https://www.wg-gesucht.de/wg-zimmer-in-Cottbus.22.0.1.0.html"
+    hot: true
   - name: "Kleinanzeigen Cottbus + surroundings (offers only)"
     url: "https://www.kleinanzeigen.de/s-auf-zeit-wg/cottbus/anzeige:angebote/c199l7743"
+    hot: true
   - name: "Senftenberg (BTU 2nd campus, ~26-33 min by train)"
     url: "https://www.wg-gesucht.de/wg-zimmer-in-Senftenberg.473.0.1.0.html"
   - name: "Forst (Lausitz) (~18-20 min, RB46)"

@@ -192,6 +192,13 @@ export class Store {
     return r?.v ?? null;
   }
 
+  /** Every kv row whose key starts with `prefix`, as a map. */
+  async kvPrefix(prefix: string): Promise<Record<string, string>> {
+    const { results } = await this.db.prepare("SELECT k, v FROM kv WHERE k LIKE ?")
+      .bind(prefix + "%").all<{ k: string; v: string }>();
+    return Object.fromEntries((results ?? []).map((r) => [r.k, r.v]));
+  }
+
   async kvSet(k: string, v: string): Promise<void> {
     await this.db.prepare(
       "INSERT INTO kv (k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v")

@@ -4,7 +4,8 @@ export interface Profile {
   about: Record<string, unknown>;
   style: Record<string, unknown>;
   behaviour?: Record<string, number>;
-  searches: { name: string; url: string }[];
+  // hot: checked every hot_minutes; the rest every poll_minutes
+  searches: { name: string; url: string; hot?: boolean }[];
   filters: Record<string, unknown>;
 }
 
@@ -13,14 +14,16 @@ export interface Settings {
   min_rent: number;
   skip_female_only: boolean;
   skip_pendler: boolean;
-  poll_minutes: number;
+  poll_minutes: number;   // quiet searches
+  hot_minutes: number;    // searches marked `hot: true` in the profile
   max_per_hour: number;
   block_backoff_min: number;
   skip_if_title_contains: string[];
 }
 
 export const BOUNDS: Record<string, [number, number]> = {
-  poll_minutes: [5, 180],
+  poll_minutes: [15, 720],
+  hot_minutes: [5, 120],
   max_per_hour: [1, 20],
   block_backoff_min: [10, 360],
   max_rent: [0, 5000],
@@ -32,7 +35,8 @@ export const LABELS: Record<string, string> = {
   min_rent: "Min rent (EUR)",
   skip_female_only: "Skip women-only WGs",
   skip_pendler: "Skip Pendler rooms",
-  poll_minutes: "Check every (minutes)",
+  poll_minutes: "Check quiet searches every (minutes)",
+  hot_minutes: "Check busy searches every (minutes)",
   max_per_hour: "Max ads per hour",
   block_backoff_min: "Pause after a captcha (minutes)",
 };
@@ -40,7 +44,7 @@ export const LABELS: Record<string, string> = {
 const DEFAULTS: Settings = {
   max_rent: 600, min_rent: 0,
   skip_female_only: true, skip_pendler: true,
-  poll_minutes: 60, max_per_hour: 2, block_backoff_min: 45,
+  poll_minutes: 180, hot_minutes: 15, max_per_hour: 2, block_backoff_min: 45,
   skip_if_title_contains: [],
 };
 
@@ -139,7 +143,8 @@ export async function behaviourSummary(store: Store, profile: Profile): Promise<
   const status = waits.length ? `${state}; ${waits.join(", ")}` : state;
   return [
     `Status:            ${status}`,
-    `Check every:       ${s.poll_minutes} min`,
+    `Busy searches:     every ${s.hot_minutes} min`,
+    `Quiet searches:    every ${s.poll_minutes} min`,
     `Max ads per hour:  ${s.max_per_hour}`,
     `Pause on captcha:  ${s.block_backoff_min} min`,
   ].join("\n");

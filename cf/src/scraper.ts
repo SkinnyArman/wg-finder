@@ -63,17 +63,22 @@ export interface CookieJar {
 }
 
 /** Keep only the name=value pairs, joined for a Cookie header. */
+/**
+ * Akamai Bot Manager cookies. A browser keeps re-validating these with
+ * JavaScript; we can't, so once Akamai flags the session every request
+ * carrying them is refused (seen on Kleinanzeigen: 403 "IP-Bereich
+ * vorübergehend gesperrt" with them, 200 without). Never keep or send them.
+ */
+const BOT_COOKIE = /^(_abck|bm_[a-z]+|ak_bmsc)$/i;
+
 function mergeCookies(existing: string, setCookie: string[]): string {
   const jar = new Map<string, string>();
-  for (const pair of existing.split(";")) {
+  const put = (pair: string) => {
     const [k, ...v] = pair.trim().split("=");
-    if (k && v.length) jar.set(k, v.join("="));
-  }
-  for (const raw of setCookie) {
-    const first = raw.split(";")[0];
-    const [k, ...v] = first.trim().split("=");
-    if (k && v.length) jar.set(k, v.join("="));
-  }
+    if (k && v.length && !BOT_COOKIE.test(k)) jar.set(k, v.join("="));
+  };
+  for (const pair of existing.split(";")) put(pair);
+  for (const raw of setCookie) put(raw.split(";")[0]);
   return [...jar].map(([k, v]) => `${k}=${v}`).join("; ");
 }
 
@@ -85,7 +90,8 @@ function mergeCookies(existing: string, setCookie: string[]): string {
  * keeps using it. The jar lives in D1 so it survives across invocations.
  */
 export async function get(url: string, jar?: CookieJar): Promise<string> {
-  const cookie = jar ? await jar.read() : null;
+  // re-filter on the way out too, for jars saved before the filter existed
+  const cookie = jar ? mergeCookies((await jar.read()) ?? "", []) : null;
   const headers: Record<string, string> = { ...HEADERS, Referer: `${BASE}/` };
   if (cookie) headers["Cookie"] = cookie;
 

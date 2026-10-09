@@ -54,6 +54,12 @@ function cookieJar(store: Store, src: Source): CookieJar {
   return { read: () => store.kvGet(key), write: (c: string) => store.kvSet(key, c) };
 }
 
+/** A site answered normally again: the next block gets reported afresh. */
+async function clearOutage(store: Store, src: Source): Promise<void> {
+  if ((await store.kvGet(`block_notified_${src}`)) === "1")
+    await store.kvSet(`block_notified_${src}`, "0");
+}
+
 // ---------------------------------------------------------------- one step
 /**
  * A single cron tick does ONE small thing, so no invocation comes near the
@@ -89,6 +95,13 @@ async function step(env: Env, tg: Telegram, force = false): Promise<string> {
   } catch (e) {
     if (e instanceof Blocked) {
       await startBlock(store, s.block_backoff_min, e.source);
+      // A flagged session is what keeps a block going, so start the retry
+      // with a clean one.
+      await store.kvSet(e.source === "wg" ? "cookies" : "cookies_ka", "");
+      // Tell the user once per outage, not on every failed retry.
+      if ((await store.kvGet(`block_notified_${e.source}`)) === "1")
+        return `${SITE[e.source]} still blocked`;
+      await store.kvSet(`block_notified_${e.source}`, "1");
       const other = SITE[e.source === "wg" ? "ka" : "wg"];
       await tg.send(
         `<b>${SITE[e.source]} wants a bot check</b>\n\n` +
@@ -132,6 +145,7 @@ async function refreshOneSearch(
   await store.kvSet("checked:" + search.url, String(nowTs));
 
   const html = await get(search.url, cookieJar(store, src));
+  await clearOutage(store, src);
   const ads: Ad[] = src === "ka" ? kaParseListing(html) : parseListing(html);
   const seen = await store.seenMany(ads.map((a) => a.ad_id));
 
@@ -151,6 +165,7 @@ async function draftOne(
 ): Promise<string> {
   const src = sourceOfId(row.ad_id);
   const html = await get(row.url, cookieJar(store, src));
+  await clearOutage(store, src);
 
   let text: string;
   let details: Record<string, string> = {};

@@ -2,11 +2,14 @@ name = "wg-finder"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
 
-# One step every 2 minutes. Each step is tiny: refresh one city's listing,
-# or fetch+draft one queued ad. That keeps every invocation well under the
-# free plan's 10ms CPU budget.
+# WG: one step every 2 minutes. Each step is tiny: refresh one city's
+# listing, or fetch+draft one queued ad. That keeps every invocation well
+# under the free plan's 10ms CPU budget.
+# Bikes: every 10 min on odd minutes, so it never shares a tick with the WG
+# job; the listing itself is checked every 30 min, the ticks between read and
+# rate new ads (src/bikes.ts matches on this exact string).
 [triggers]
-crons = ["*/2 * * * *"]
+crons = ["*/2 * * * *", "5,15,25,35,45,55 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -15,3 +18,5 @@ database_id = "2982a6b8-3107-401c-bed5-7a30249781f6"
 
 [vars]
 OPENAI_MODEL = "gpt-5.6-terra"
+# rating bike ads is a small job: the budget model
+BIKES_MODEL = "gpt-5.6-luna"

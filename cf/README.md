@@ -75,17 +75,32 @@ that `setWebhook` disables long-polling for that token automatically.
 Commands are identical to the Python version: `/scan`, `/more`, `/filters`,
 `/settings`, `/pause`, `/resume`, `/stats`, `/retry`.
 
-Logs:
+### Bike alerts
 
-    npx wrangler tail
+A second, independent job (`src/bikes.ts`, `src/bikeai.ts`) posts bikes from
+Kleinanzeigen within 30 km of Cottbus that are free or under a price cap
+(default 30 €) to the same group. Each one is read in full and rated 1-10 by
+a cheap model (`BIKES_MODEL`, gpt-5.6-luna), with one line on why it got that
+score and the things worth knowing before you go and get it: defects, size,
+what's included, pickup limits.
 
-Change your profile later: edit `../profile.yaml`, then
+What gets through: whole bikes only. Parts and accessories are dropped by
+title for free, then by the ad page's own "Art: Zubehör" field, and anything
+left that still isn't a bike is caught by the model.
 
-    ./make-profile.sh
-    npx wrangler d1 execute wg-finder --remote --file=profile.sql
+It runs on its own cron (every 10 min on odd minutes), so it never shares a
+tick or CPU budget with the WG job. The listing is checked every 30 min; the
+ticks in between read and rate at most two new ads each. It keeps its own
+backoff and cookie jar: if Kleinanzeigen rate-limits the bike search, the WG
+search is not paused. While the WG search is itself being limited by
+Kleinanzeigen, the bike job sits those runs out rather than make it worse.
+Only one bike run works at a time (a lock in D1 that expires after 5 min), so
+overlapping triggers or a tap on "Check now" can't post a bike twice.
 
-The Worker caches the profile per isolate, so give it a minute (or redeploy)
-for the change to take everywhere.
+`/bikes` is open to **everyone in the group** (all other commands stay
+owner-only): it shows the state with buttons for the price cap, a minimum
+rating, pause and check-now. Also `/bikes price 30`, `/bikes min 5`,
+`/bikes on|off|now`. It ignores `/pause`, which only stops the room search.
 
 ## Local development
 
@@ -100,6 +115,6 @@ Fire a scan by hand:
 
 ## Costs
 
-Free plan: 100k requests/day, 5 cron triggers, D1 included. This uses roughly
-720 cron invocations a day and a handful of webhook calls. The only thing you
+Free plan: 100k requests/day, 5 cron triggers, D1 included. This uses 2
+triggers, roughly 870 cron invocations a day and a handful of webhook calls. The only thing you
 pay for is OpenAI, same as before.

@@ -14,6 +14,10 @@ import {
 } from "./settings.ts";
 import { compose } from "./writer.ts";
 import { Telegram, esc, type Button } from "./telegram.ts";
+import {
+  BIKES_CRON, bikeStep, bikesKeyboard, bikesLine, bikesStatus, loadBikeSettings,
+  setBikeSetting, setBikes,
+} from "./bikes.ts";
 
 export interface Env {
   DB: D1Database;
@@ -23,6 +27,7 @@ export interface Env {
   TELEGRAM_CHAT_ID: string;
   TELEGRAM_OWNER_ID: string;
   WEBHOOK_SECRET: string;
+  BIKES_MODEL?: string;
 }
 
 // The profile is ~4.5KB of JSON - too big for a Worker secret (5.1KB limit,
@@ -263,6 +268,7 @@ export async function statusReport(env: Env, store: Store, profile: Profile): Pr
     `Last ad sent:    ${ago}`,
     `Searches:        ${(profile.searches ?? []).length}`,
     ...(stats.pending ? [`Waiting on you:  ${stats.pending}  → /review`] : []),
+    await bikesLine(store),
     "",
     `Seen so far: ${seen}`,
   ].join("\n");
@@ -378,7 +384,6 @@ const filtersKeyboard = (s: Settings): Button[][] => [
 
 async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> {
   const store = new Store(env.DB);
-  const profile = await profileOf(env);
 
   const text: string = update.message?.text ?? "";
   const isCommand = text.startsWith("/");
@@ -390,9 +395,22 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
 
   const from = update.message?.from ?? update.callback_query?.from;
   const owner = String(env.TELEGRAM_OWNER_ID || env.TELEGRAM_CHAT_ID);
+  const isOwner = !!from && String(from.id) === owner;
+
+  // Bike alerts belong to the whole group: anyone in it may run /bikes and
+  // press its buttons. Everything else stays the owner's.
+  const chatId = String(update.message?.chat?.id ?? update.callback_query?.message?.chat?.id ?? "");
+  const inGroup = chatId === String(env.TELEGRAM_CHAT_ID);
+  const bikeCmd = /^\/bikes(@\w+)?(\s|$)/i.test(text.trim());
+  const bikeBtn = String(update.callback_query?.data ?? "").startsWith("bk:");
+  if ((bikeCmd || bikeBtn) && (isOwner || inGroup))
+    return handleBikes(update, env, tg, store);
+
+  const profile = await profileOf(env);
   const name = (profile.about as any)?.name ?? "its owner";
-  if (!from || String(from.id) !== owner) {
-    const deny = `Sorry, this bot was built for ${name}'s own flat search and only answers to them.`;
+  if (!isOwner) {
+    const deny = `Sorry, this bot was built for ${name}'s own flat search and only answers to them.` +
+      (inGroup ? " Bike alerts are open to everyone here: /bikes" : "");
     if (update.callback_query) {
       await tg.answerCallback(update.callback_query.id, deny, true);
     } else {
@@ -419,7 +437,8 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
         `\n\n/status — is it running\n/review — decide on ads you haven't answered\n` +
         `/pause [2h] — stop it\n` +
         `/scan — check now\n/more [n] — send more now\n` +
-        `/filters — which ads qualify\n/settings — timing\n/stats — totals`);
+        `/filters — which ads qualify\n/settings — timing\n/stats — totals\n` +
+        `/bikes — free & cheap bike alerts`);
       return;
     }
 
@@ -443,7 +462,8 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
         `/review — decide on ads you haven't answered\n` +
         `/pause [2h] — stop it\n/scan — check now\n/more [n] — send more now\n` +
         `/filters — which ads qualify\n/settings — timing\n` +
-        `/stats — totals\n/retry — re-draft failed`);
+        `/stats — totals\n/retry — re-draft failed\n` +
+        `/bikes — free & cheap bike alerts (anyone in the group)`);
       return;
 
     case "/stats": {
@@ -527,6 +547,57 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
       await reply("Unknown command. /help");
       return;
   }
+}
+
+/** /bikes and its buttons - for anyone in the group. */
+async function handleBikes(update: any, env: Env, tg: Telegram, store: Store): Promise<void> {
+  const cq = update.callback_query;
+  if (cq) {
+    const [, act, delta] = String(cq.data).split(":");
+    const s = await loadBikeSettings(store);
+    let toast = "";
+    if (act === "price") toast = await setBikeSetting(store, "max_price", s.max_price + Number(delta));
+    else if (act === "min") toast = await setBikeSetting(store, "min_score", s.min_score + Number(delta));
+    else if (act === "on" || act === "off") {
+      await setBikes(store, act === "on");
+      toast = act === "on" ? "Bike alerts on" : "Bike alerts paused";
+    } else if (act === "now") {
+      const r = await bikeStep(env, store, tg, true);
+      toast = r.replace(/^bikes: /, "Checked: ");
+    }
+    await tg.answerCallback(cq.id, toast);
+    try {
+      await tg.editText(cq.message.chat.id, cq.message.message_id,
+        await bikesStatus(env.DB, store), bikesKeyboard(await loadBikeSettings(store)));
+    } catch { /* unchanged */ }
+    return;
+  }
+
+  const chat = String(update.message.chat.id);
+  const reply = (t: string, o: Record<string, unknown> = {}) => tg.send(t, o, chat);
+  const [, sub = "", val] = update.message.text.trim().split(/\s+/);
+  switch (sub.toLowerCase()) {
+    case "": break;
+    case "on": case "off":
+      await setBikes(store, sub.toLowerCase() === "on");
+      break;
+    case "now":
+      await reply((await bikeStep(env, store, tg, true)).replace(/^bikes: /, "Checked: "));
+      break;
+    case "price": case "min": {
+      const n = Number(val);
+      if (!val || !Number.isFinite(n)) {
+        await reply(sub === "price" ? "Try /bikes price 30" : "Try /bikes min 5 (0 = post every bike)");
+        return;
+      }
+      await reply(await setBikeSetting(store, sub === "price" ? "max_price" : "min_score", n));
+      break;
+    }
+    default:
+      await reply("Try /bikes, /bikes price 30, /bikes min 5, /bikes on, /bikes off, /bikes now");
+      return;
+  }
+  await reply(await bikesStatus(env.DB, store), tg.keyboard(bikesKeyboard(await loadBikeSettings(store))));
 }
 
 async function handleButton(
@@ -645,9 +716,18 @@ async function handleButton(
 
 // ------------------------------------------------------------- entrypoints
 export default {
-  async scheduled(_c: ScheduledController, env: Env, ctx: ExecutionContext) {
+  async scheduled(c: ScheduledController, env: Env, ctx: ExecutionContext) {
     const tg = new Telegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID);
-    ctx.waitUntil(step(env, tg).then(
+    // Two independent jobs on two triggers: a bike-search failure can't
+    // touch the WG step, and neither shares the other's CPU budget. The WG
+    // trigger only ever fires on even minutes, the bike one on odd minutes -
+    // dispatching on that, not just the exact cron text, keeps working while
+    // a changed trigger is still rolling out (that takes Cloudflare minutes).
+    const odd = new Date(c.scheduledTime).getUTCMinutes() % 2 === 1;
+    const job = c.cron === BIKES_CRON || odd
+      ? bikeStep(env, new Store(env.DB), tg)
+      : step(env, tg);
+    ctx.waitUntil(job.then(
       (r) => console.log("step:", r),
       (e) => console.error("step failed:", e?.message ?? e)));
   },

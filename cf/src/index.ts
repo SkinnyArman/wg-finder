@@ -10,6 +10,7 @@ import { Store, type AdRow } from "./store.ts";
 import {
   SITE, SOURCES, behaviourSummary, blocks, clearBlock, filtersSummary, fmtLeft,
   loadSettings, pause, pauseState, resume, setSetting, startBlock,
+  dueOutageNotice, endOutage, noteBlock, outageHours,
   type Profile, type Settings, type Source,
 } from "./settings.ts";
 import { compose } from "./writer.ts";
@@ -59,11 +60,8 @@ function cookieJar(store: Store, src: Source): CookieJar {
   return { read: () => store.kvGet(key), write: (c: string) => store.kvSet(key, c) };
 }
 
-/** A site answered normally again: the next block gets reported afresh. */
-async function clearOutage(store: Store, src: Source): Promise<void> {
-  if ((await store.kvGet(`block_notified_${src}`)) === "1")
-    await store.kvSet(`block_notified_${src}`, "0");
-}
+/** A site answered normally again: its outage, and its backoff streak, are over. */
+const clearOutage = (store: Store, src: Source) => endOutage(store, src);
 
 // ---------------------------------------------------------------- one step
 /**
@@ -99,22 +97,26 @@ async function step(env: Env, tg: Telegram, force = false): Promise<string> {
     return await refreshOneSearch(store, profile, s, b);
   } catch (e) {
     if (e instanceof Blocked) {
-      await startBlock(store, s.block_backoff_min, e.source);
+      // Wait longer each time it refuses again (45, 90, 180… up to 6 h):
+      // knocking every 45 minutes is what keeps a block going.
+      const o = await noteBlock(store, e.source);
+      const mins = Math.min(s.block_backoff_min * 2 ** (o.streak - 1), 360);
+      await startBlock(store, mins, e.source);
       // A flagged session is what keeps a block going, so start the retry
       // with a clean one.
       await store.kvSet(e.source === "wg" ? "cookies" : "cookies_ka", "");
-      // Tell the user once per outage, not on every failed retry.
-      if ((await store.kvGet(`block_notified_${e.source}`)) === "1")
-        return `${SITE[e.source]} still blocked`;
-      await store.kvSet(`block_notified_${e.source}`, "1");
-      const other = SITE[e.source === "wg" ? "ka" : "wg"];
-      await tg.send(
-        `<b>${SITE[e.source]} wants a bot check</b>\n\n` +
-        `This is their rate limiting, not a crash, and nothing is lost — ` +
-        `every ad I hadn't got to is still queued.\n\n` +
-        `<b>Trying ${SITE[e.source]} again in ${s.block_backoff_min} minutes</b>, ` +
-        `automatically. ${other} keeps running meanwhile.\n\nCountdown: /status`);
-      return `${SITE[e.source]} blocked`;
+      // Routine bot checks stay out of the group; /status has the countdown.
+      // Only an outage that drags on gets a message, and only one.
+      if (await dueOutageNotice(store, e.source, o)) {
+        const other = SITE[e.source === "wg" ? "ka" : "wg"];
+        await tg.send(
+          `⏳ <b>${SITE[e.source]} has been blocking the room search for ` +
+          `${outageHours(o)} hours</b>\n\n` +
+          `It keeps retrying by itself, waiting longer each time (next try in ` +
+          `${mins} min). Nothing is lost, and ${other} isn't affected. ` +
+          `Nothing to do unless this goes on for days.\n\nDetails: /status`);
+      }
+      return `${SITE[e.source]} blocked, retry in ${mins} min`;
     }
     throw e;
   }
@@ -538,7 +540,7 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
 
     case "/retry": {
       const n = await store.retryFailed();
-      for (const x of SOURCES) await clearBlock(store, x);
+      for (const x of SOURCES) { await clearBlock(store, x); await endOutage(store, x); }
       await reply(`Cleared ${n} failed ad(s).`);
       return;
     }

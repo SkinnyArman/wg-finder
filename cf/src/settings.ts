@@ -130,6 +130,42 @@ export async function blocks(store: Store): Promise<Record<Source, number>> {
   return { wg: await blockSecondsLeft(store, "wg"), ka: await blockSecondsLeft(store, "ka") };
 }
 
+// ---------- outages: quiet unless they drag on ----------
+// Bot checks are routine. They clear by themselves and /status shows the
+// countdown, so the group isn't told about them. An outage is the stretch
+// from the first refusal to the next normal answer; only one that has lasted
+// LONG_OUTAGE_HOURS is worth a message, and it gets exactly one.
+export const LONG_OUTAGE_HOURS = 6;
+
+export interface Outage { since: number; streak: number; notified: boolean }
+
+const outageKey = (name: string) => `outage:${name}`;
+
+/** Record a refusal: the outage starts (or goes on), the streak grows. */
+export async function noteBlock(store: Store, name: string): Promise<Outage> {
+  const raw = await store.kvGet(outageKey(name));
+  const o: Outage = raw ? JSON.parse(raw) : { since: 0, streak: 0, notified: false };
+  o.since ||= Math.floor(Date.now() / 1000);
+  o.streak += 1;
+  await store.kvSet(outageKey(name), JSON.stringify(o));
+  return o;
+}
+
+/** True once per outage, after it has lasted LONG_OUTAGE_HOURS. */
+export async function dueOutageNotice(store: Store, name: string, o: Outage): Promise<boolean> {
+  if (o.notified || Date.now() / 1000 - o.since < LONG_OUTAGE_HOURS * 3600) return false;
+  await store.kvSet(outageKey(name), JSON.stringify({ ...o, notified: true }));
+  return true;
+}
+
+/** A normal answer again: the outage is over. One read when nothing was wrong. */
+export async function endOutage(store: Store, name: string): Promise<void> {
+  if (await store.kvGet(outageKey(name))) await store.kvSet(outageKey(name), "");
+}
+
+export const outageHours = (o: Outage) =>
+  Math.max(1, Math.round((Date.now() / 1000 - o.since) / 3600));
+
 export function fmtLeft(seconds: number): string {
   const mins = Math.floor(seconds / 60) + 1;
   return mins >= 60 ? `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m` : `${mins} min`;

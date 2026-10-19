@@ -75,6 +75,12 @@ that `setWebhook` disables long-polling for that token automatically.
 Commands are identical to the Python version: `/scan`, `/more`, `/filters`,
 `/settings`, `/pause`, `/resume`, `/stats`, `/retry`.
 
+**Bot checks are handled quietly.** When wg-gesucht or Kleinanzeigen refuses a
+request, that site (and only that site) waits and retries by itself, longer
+each time it's refused again: 45, 90, 180 minutes, up to 6 hours. The group
+isn't told - `/status` (and `/bikes`) show the countdown. Only an outage that
+has gone on for 6 hours straight sends one message, once.
+
 ### Bike alerts
 
 A second, independent job (`src/bikes.ts`, `src/bikeai.ts`) posts adult bikes

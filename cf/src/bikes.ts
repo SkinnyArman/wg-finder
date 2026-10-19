@@ -16,13 +16,17 @@
 import { Blocked, get, type CookieJar } from "./scraper.ts";
 import { parseListing, parseAd } from "./kleinanzeigen.ts";
 import { assessBike } from "./bikeai.ts";
-import { blockSecondsLeft, fmtLeft } from "./settings.ts";
+import {
+  blockSecondsLeft, dueOutageNotice, endOutage, fmtLeft, noteBlock, outageHours,
+} from "./settings.ts";
 import type { Store } from "./store.ts";
 import { esc, type Button, type Telegram } from "./telegram.ts";
 
 export const BIKES_CRON = "5,15,25,35,45,55 * * * *";
 export const RADIUS_KM = 30;
-const LIST_EVERY_MIN = 30;
+// Minutes between checks of each search. "Weiteres" is mostly parts, so it
+// isn't worth the requests as often.
+const EVERY_MIN: Record<string, number> = { damen: 30, herren: 30, weiteres: 120 };
 const ASSESS_PER_TICK = 2;
 // Telegram allows about 20 messages a minute into a group.
 const SEND_PER_TICK = 6;
@@ -281,20 +285,19 @@ export async function bikeStep(
     await ensureTable(db);
     const did: string[] = [];
     try {
-      // the most overdue search, if it's due
+      // the most overdue search, if one is due ("Check now": the most overdue anyway)
       const checked = await store.kvPrefix("bikes_checked:");
-      const [art, at] = SEARCHES
-        .map((a) => [a, Number(checked["bikes_checked:" + a] ?? 0)] as const)
-        .reduce((x, y) => (y[1] < x[1] ? y : x));
-      if (forceList || now() - at >= (LIST_EVERY_MIN - 2) * 60)
+      const [art, overdue] = SEARCHES
+        .map((a) => [a, now() - Number(checked["bikes_checked:" + a] ?? 0) - (EVERY_MIN[a] - 2) * 60] as const)
+        .reduce((x, y) => (y[1] > x[1] ? y : x));
+      if (forceList || overdue >= 0)
         did.push(await checkListing(db, store, s, art));
       did.push(await assessSome(env, store, s));
     } catch (e) {
       if (!(e instanceof Blocked)) throw e;
       return await backOff(store, tg, e.message);
     }
-    if ((await store.kvGet("bikes_backoff")) !== "0") await store.kvSet("bikes_backoff", "0");
-    if ((await store.kvGet("bikes_block_notified")) === "1") await store.kvSet("bikes_block_notified", "0");
+    await endOutage(store, "bikes");
 
     const sent = await sendReady(db, tg, s);
     if (did.length > 1 && did[1] === "nothing to rate") did.pop();
@@ -362,7 +365,8 @@ async function assessSome(env: BikeEnv, store: Store, s: BikeSettings): Promise<
       await setRow(db, row.ad_id, { status: "skipped", why: `price ${row.price}` });
       continue;
     }
-    if (i) await sleep(1500 + Math.random() * 2000);    // don't fire pages back to back
+    // never two requests back to back - not even right after the listing
+    await sleep(2000 + Math.random() * 2500);
 
     // Blocked propagates: the tick backs off as a whole
     const html = await get(row.url, jar(store));
@@ -409,20 +413,19 @@ async function assessSome(env: BikeEnv, store: Store, s: BikeSettings): Promise<
 }
 
 async function backOff(store: Store, tg: Telegram, why: string): Promise<string> {
-  const n = Number((await store.kvGet("bikes_backoff")) ?? 0);
-  const mins = BACKOFF_MIN[Math.min(n, BACKOFF_MIN.length - 1)];
-  await store.kvSet("bikes_backoff", String(n + 1));
+  const o = await noteBlock(store, "bikes");
+  const mins = BACKOFF_MIN[Math.min(o.streak - 1, BACKOFF_MIN.length - 1)];
   await store.kvSet("bikes_blocked_until", String(now() + mins * 60));
   // A flagged session keeps a block going; retry with a clean one. This is
   // the bike search's own jar - the WG search's session is left alone.
   await store.kvSet("cookies_bikes", "");
-  if ((await store.kvGet("bikes_block_notified")) !== "1") {
-    await store.kvSet("bikes_block_notified", "1");
+  // Routine: silent, /bikes shows the countdown. Only a long one gets a word.
+  if (await dueOutageNotice(store, "bikes", o))
     await tg.send(
-      `🚲 <b>Kleinanzeigen is rate-limiting the bike search</b>\n\n` +
-      `Trying again in ${mins} minutes, automatically. Nothing is lost, and ` +
-      `the WG search keeps its own schedule.`);
-  }
+      `🚲 <b>Kleinanzeigen has been blocking the bike search for ` +
+      `${outageHours(o)} hours</b>\n\n` +
+      `It keeps retrying by itself (next try in ${mins} min). Nothing is ` +
+      `lost, and the room search isn't affected.`);
   return `bikes: blocked (${why}), retry in ${mins} min`;
 }
 
@@ -514,7 +517,7 @@ export async function bikesStatus(db: D1Database, store: Store): Promise<string>
     `Each one is read and rated out of 10 by AI before it's posted.`,
     "",
     `Min rating:   ${s.min_score ? `${s.min_score}/10` : "none, all bikes"}`,
-    `Last check:   ${ago} (every ${LIST_EVERY_MIN} min)`,
+    `Last check:   ${ago}`,
     ...(until > now() ? [`Backing off:  ${fmtLeft(until - now())} left`] : []),
     `Posted (24h): ${day}`,
     `Posted total: ${total}`,

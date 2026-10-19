@@ -77,20 +77,31 @@ Commands are identical to the Python version: `/scan`, `/more`, `/filters`,
 
 ### Bike alerts
 
-A second, independent job (`src/bikes.ts`, `src/bikeai.ts`) posts bikes from
-Kleinanzeigen within 30 km of Cottbus that are free or under a price cap
+A second, independent job (`src/bikes.ts`, `src/bikeai.ts`) posts adult bikes
+from Kleinanzeigen within 30 km of Cottbus that are free or under a price cap
 (default 30 €) to the same group. Each one is read in full and rated 1-10 by
 a cheap model (`BIKES_MODEL`, gpt-5.6-luna), with one line on why it got that
 score and the things worth knowing before you go and get it: defects, size,
 what's included, pickup limits.
 
-What gets through: whole bikes only. Parts and accessories are dropped by
-title for free, then by the ad page's own "Art: Zubehör" field, and anything
-left that still isn't a bike is caught by the model.
+What gets through is decided mostly without AI:
+
+1. The searches ask for the seller's own category - Damen, Herren and
+   Weiteres - so kids' bikes and accessories are never fetched.
+2. Title rules reject what's obvious: part words (Reifen, Felge, Sattel…),
+   "Fahrrad…" compounds (Fahrradlenker, Fahrradnavi), kids' markers, and
+   accessories named before any bike.
+3. The ad page's own "Art" field must not say Kinder or Zubehör.
+4. Ads that were already more than 2 days old when first seen are stored
+   quietly: no backlog flood when a search starts, no pinned "TOP" ads.
+
+Only what's left reaches the AI, in the one call it needs anyway for the
+rating; that call also confirms it's a whole bike, which settles the titles
+rules can't ("Cervelo ZFS-5", or a part listing that says "Fahrrad").
 
 It runs on its own cron (every 10 min on odd minutes), so it never shares a
-tick or CPU budget with the WG job. The listing is checked every 30 min; the
-ticks in between read and rate at most two new ads each. It keeps its own
+tick or CPU budget with the WG job. Each tick checks one of the three
+searches (each every 30 min) and reads and rates at most two new ads. It keeps its own
 backoff and cookie jar: if Kleinanzeigen rate-limits the bike search, the WG
 search is not paused. While the WG search is itself being limited by
 Kleinanzeigen, the bike job sits those runs out rather than make it worse.

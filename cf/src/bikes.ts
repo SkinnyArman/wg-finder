@@ -1,4 +1,4 @@
-// Free and cheap bikes around Cottbus, rated by AI, straight to Telegram.
+// Free and cheap adult bikes around Cottbus, rated by AI, straight to Telegram.
 //
 // Kept apart from the WG search on purpose:
 //   - its own cron (odd minutes), which never lands on the WG job's
@@ -7,10 +7,11 @@
 //     search never pauses the WG search
 //   - its own settings and on/off, open to everyone in the group
 //
-// Each tick stays small: the listing check when it's due (every 30 min),
-// then reading + rating at most two new ads. Parsing all of that is ~2.5ms
-// of CPU, well inside the free plan's budget, and it spreads the requests to
-// Kleinanzeigen out instead of bursting them.
+// Each tick stays small: one listing check (the most overdue of the three
+// searches, each due every 30 min), then reading + rating at most two new
+// ads. Parsing all of that is ~2.5ms of CPU, well inside the free plan's
+// budget, and it spreads the requests to Kleinanzeigen out instead of
+// bursting them.
 
 import { Blocked, get, type CookieJar } from "./scraper.ts";
 import { parseListing, parseAd } from "./kleinanzeigen.ts";
@@ -38,12 +39,19 @@ export interface BikeEnv {
 const now = () => Math.floor(Date.now() / 1000);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// The seller's own category ("Art") is part of the search, so kids' bikes
+// (Kinder) and accessories (Zubehör) are never even fetched. "Weiteres" is
+// mostly parts, but it's where unisex and odd bikes end up; the title rules
+// below sort it.
+export const SEARCHES = ["damen", "herren", "weiteres"] as const;
+export type Art = (typeof SEARCHES)[number];
+
 // Fahrräder & Zubehör (c217), offers only, up to max € ("Zu verschenken"
 // counts as 0 €), RADIUS_KM around Cottbus (l7743), newest first. Far fewer
 // than a page (25) of new ads appear in 30 minutes, so page 1 is enough.
-export const searchUrl = (maxPrice: number) =>
-  "https://www.kleinanzeigen.de/s-fahrraeder/cottbus/anzeige:angebote/" +
-  `preis::${maxPrice}/c217l7743r${RADIUS_KM}`;
+export const searchUrl = (art: Art, maxPrice: number) =>
+  `https://www.kleinanzeigen.de/s-fahrraeder/${art}/cottbus/anzeige:angebote/` +
+  `preis::${maxPrice}/c217l7743r${RADIUS_KM}+fahrraeder.art_s:${art}`;
 
 // ---------------------------------------------------------------- settings
 export interface BikeSettings { on: boolean; max_price: number; min_score: number }
@@ -77,15 +85,26 @@ export async function setBikeSetting(
 export const setBikes = (store: Store, on: boolean) => store.kvSet("bikes_on", on ? "1" : "0");
 
 // ---------------------------------------------------------------- filter
-// A cheap first pass on the title, so the AI only reads plausible bikes. The
-// category mixes whole bikes with parts and accessories. Judge the title up
-// to the first "mit"/"inkl"/comma: "Kinderfahrrad mit Stützrädern" is a bike,
-// "2 Stützräder für Kinderfahrrad" is not. German compounds put the thing
-// itself last ("Fahrradhelm" is a helmet), so these words also count at the
-// end of a longer word. Anything unsure goes on to the AI.
+// The obvious cases are decided without AI, and that's most of them:
+//   1. the search only asks for Damen, Herren and Weiteres (see SEARCHES)
+//   2. the title: sellers still file saddles, rims and shirts under Damen or
+//      Herren, so part words, kids' markers and accessories are rejected here
+//   3. the ad page's own "Art" field must not say Kinder or Zubehör
+// What's left gets one AI call - the one it would get anyway for its rating -
+// and that call also confirms it's a whole adult bike. So unsure titles cost
+// nothing extra: they go to the AI instead of being guessed at.
+//
+// Titles are judged up to the first "mit"/"inkl"/comma: "Damenrad mit Korb"
+// is a bike. German compounds put the thing itself last ("Fahrradhelm" is a
+// helmet), so part words also count at the end of a longer word, and a
+// "Fahrrad…" compound (Fahrradlenker, Fahrradnavi) is always a thing for a
+// bike, never the bike.
 
 const NOT_BIKE = /hoverboard|scooter|segway|tretroller|\broller\b|skateboard|inliner|heimtrainer|hometrainer|ergometer|spinning|kinderwagen|buggy/;
 const SEARCHING = /\b(suche|gesucht)\b/;
+const KIDS = /kinder|kids|mädchen|maedchen|jungen(fahr)?rad|kleinkind|lauflern|\bab \d+ jahr|\b(12|14|16|18)\s*(zoll|"|”|er)(?![\p{L}\d])/u;
+// a balance bike, or a wheel - neither is wanted
+const LAUFRAD = /laufrad\b|laufräder\b/;
 
 // Sold on their own, never a bike: "Drahtreifen", "Alu-Pedale", "Fahrradhelm"
 const PART = [
@@ -95,7 +114,8 @@ const PART = [
   "nabenmotor", "akku", "ladegerät", "werkzeug", "helm", "pumpe", "kindersitz",
   "kindersitze", "fahrradsitz", "sitzbezug", "anhänger", "halterung", "tacho",
   "computer", "handschuhe", "trikot", "hose", "schuhe", "brille", "schutz",
-  "schützer", "flaschenhalter", "cape", "hupe", "griffe",
+  "schützer", "flaschenhalter", "cape", "hupe", "griffe", "vorbau", "kupplung",
+  "aufhängung", "shirt",
 ];
 // Often listed as a bike's features ("Damenrad 28 Zoll Gepäckträger Korb"):
 // only a part when no bike word comes before it.
@@ -103,34 +123,45 @@ const FEATURE = [
   "schloss", "träger", "ständer", "klingel", "halter", "stützrad", "stützräder",
   "beleuchtung", "lampe", "rücklicht", "frontlicht", "scheinwerfer", "spiegel",
   "schutzblech", "schutzbleche", "tasche", "taschen", "korb", "sattel", "lenker",
-  "gabel",
+  "gabel", "rahmen", "dynamo",
 ];
 // whole words only - as word endings these would hit "Besitz", "vielleicht"
 const PART_WORD = new Set([
-  "motor", "helmet", "lock", "pump", "tire", "tires", "tyre", "tube", "pedals",
-  "saddle", "chain", "cassette", "brake", "brakes", "pads", "rack", "bag",
-  "bottle", "grips", "mudguard", "fender", "bell", "horn",
+  "motor", "navi", "lift", "helmet", "lock", "pump", "tire", "tires", "tyre",
+  "tube", "pedals", "saddle", "chain", "cassette", "brake", "brakes", "pads",
+  "rack", "bag", "bottle", "grips", "mudguard", "fender", "bell", "horn",
 ]);
 const FEATURE_WORD = new Set(["licht", "sitz", "light", "lights"]);
 
-const BIKE = /(rad|räder|bike|bikes|mtb|bmx|pedelec|cruiser|fixie|singlespeed)$/;
+const BIKE = /(rad|räder|bike|bikes|mtb|bmx|pedelec|cruiser|fixie|singlespeed|tandem)$/;
 const NOT_A_WHOLE_BIKE = /(stütz|hinter|vorder|zahn|ketten|schwung)r(ad|äder)$/;
 const isBike = (w: string) => BIKE.test(w) && !NOT_A_WHOLE_BIKE.test(w);
+// "fahrradlenker", "fahrradnavi" - but "fahrrad" / "fahrräder" themselves are bikes
+const FAHRRAD_THING = (w: string) => /^fahrr(ad|äder)./.test(w) && !/^fahrr(ad|äder)s?$/.test(w);
 
-/** Why an ad clearly isn't a bike, or null if it might be one. */
+/**
+ * Why an ad clearly isn't an adult bike, or null when it is one or when the
+ * title alone can't tell ("Cervelo ZFS-5") - the AI call settles those.
+ */
 export function rejectReason(title: string): string | null {
   // join hyphenated compounds: "Spike-Reifen" -> "spikereifen"
   const t = title.toLowerCase().replace(/([\p{L}\d])-(?=[\p{L}\d])/gu, "$1");
   if (NOT_BIKE.test(t)) return "not a bike";
   if (SEARCHING.test(t)) return "someone searching";
+  if (KIDS.test(t)) return "kids' bike";
+  if (LAUFRAD.test(t)) return "balance bike or wheel";
   const head = t.split(/\s+(?:mit|inkl\.?|inklusive|samt|sowie|und|plus)\s+|\s*[+&,/|]\s*|\s+-\s+/)[0];
-  let bikeSeen = false;
+  let bikes = 0;
   for (const w of head.split(/[^\p{L}\d]+/u)) {
     if (!w) continue;
-    if (PART_WORD.has(w) || PART.some((p) => w.endsWith(p))) return `part (${w})`;
-    if (!bikeSeen && (FEATURE_WORD.has(w) || FEATURE.some((p) => w.endsWith(p))))
+    const part = PART_WORD.has(w) || PART.some((p) => w.endsWith(p)) ? `part (${w})`
+      : FAHRRAD_THING(w) ? `accessory (${w})` : "";
+    // "28" Damen-Cityrad City-Fahrrad Damenrad Vorderrad…": a bike named
+    // over and over with a part in its feature list - let the AI look
+    if (part) return bikes >= 2 ? null : part;
+    if (!bikes && (FEATURE_WORD.has(w) || FEATURE.some((p) => w.endsWith(p))))
       return `accessory (${w})`;
-    if (isBike(w)) bikeSeen = true;
+    if (isBike(w)) bikes++;
   }
   return null;
 }
@@ -141,6 +172,28 @@ export function priceEur(text: string): number | null {
   const m = /(\d[\d.]*)\s*€/.exec(text);
   return m ? Number(m[1].replace(/\./g, "")) : null;
 }
+
+/**
+ * When each card on a listing says it was posted, by ad id. Only today's and
+ * yesterday's count as fresh; anything older seen for the first time is a
+ * backlog (a search's very first page) or a paid ad pinned to the top.
+ */
+function cardDates(html: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const blk of html.split(/<article class="[^"]*" data-adid=/).slice(1)) {
+    const id = /^"(\d+)"/.exec(blk)?.[1];
+    const d = /(Heute|Gestern|\d{2}\.\d{2}\.\d{4})/.exec(blk.split("</article>", 1)[0])?.[1];
+    if (id && d) out.set("ka-" + id, d);
+  }
+  return out;
+}
+
+const isStale = (posted: string | undefined): boolean => {
+  const m = posted && /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(posted);
+  if (!m) return false;                              // Heute, Gestern, or unknown
+  const at = Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  return Date.now() - at > 2 * 86400_000;
+};
 
 const distanceKm = (place: string): number | null => {
   const m = /(\d+)\s*km/.exec(place);
@@ -228,9 +281,13 @@ export async function bikeStep(
     await ensureTable(db);
     const did: string[] = [];
     try {
-      const last = Number((await store.kvGet("bikes_checked")) ?? 0);
-      if (forceList || now() - last >= (LIST_EVERY_MIN - 2) * 60)
-        did.push(await checkListing(db, store, s));
+      // the most overdue search, if it's due
+      const checked = await store.kvPrefix("bikes_checked:");
+      const [art, at] = SEARCHES
+        .map((a) => [a, Number(checked["bikes_checked:" + a] ?? 0)] as const)
+        .reduce((x, y) => (y[1] < x[1] ? y : x));
+      if (forceList || now() - at >= (LIST_EVERY_MIN - 2) * 60)
+        did.push(await checkListing(db, store, s, art));
       did.push(await assessSome(env, store, s));
     } catch (e) {
       if (!(e instanceof Blocked)) throw e;
@@ -247,12 +304,15 @@ export async function bikeStep(
   }
 }
 
-async function checkListing(db: D1Database, store: Store, s: BikeSettings): Promise<string> {
-  const html = await get(searchUrl(s.max_price), jar(store));
+async function checkListing(
+  db: D1Database, store: Store, s: BikeSettings, art: Art,
+): Promise<string> {
+  const html = await get(searchUrl(art, s.max_price), jar(store));
   // only once it worked: after a block the next tick should look again
-  await store.kvSet("bikes_checked", String(now()));
+  await store.kvSet("bikes_checked:" + art, String(now()));
   const ads = parseListing(html);
   if (!ads.length) return "listing empty";
+  const posted = cardDates(html);
 
   const marks = ads.map(() => "?").join(",");
   const { results } = await db.prepare(`SELECT ad_id FROM bikes WHERE ad_id IN (${marks})`)
@@ -271,6 +331,8 @@ async function checkListing(db: D1Database, store: Store, s: BikeSettings): Prom
       price !== null && price > s.max_price ? `price ${ad.rent}`
       // a thin result page gets padded with ads from far away
       : km !== null && km > RADIUS_KM + 5 ? `too far (${km} km)`
+      // no flood of old ads when a search starts, no pinned "TOP" ads
+      : isStale(posted.get(ad.ad_id)) ? `old ad (${posted.get(ad.ad_id)})`
       : rejectReason(ad.title);
     if (!why) maybe++;
     await db.prepare(
@@ -280,10 +342,10 @@ async function checkListing(db: D1Database, store: Store, s: BikeSettings): Prom
       .bind(ad.ad_id, ad.url, ad.title, ad.rent, ad.district, ad.image,
             ad.snippet ?? "", why ? "skipped" : "new", why, now()).run();
   }
-  return `listing ${ads.length} ads, ${fresh} new, ${maybe} to rate`;
+  return `${art} ${ads.length} ads, ${fresh} new, ${maybe} to rate`;
 }
 
-/** Read the full ad and let the AI decide and rate, for up to two new ads. */
+/** Read the full ad; the AI confirms it's a whole bike and rates it. Two per tick. */
 async function assessSome(env: BikeEnv, store: Store, s: BikeSettings): Promise<string> {
   const db = env.DB;
   const { results } = await db.prepare(
@@ -311,9 +373,10 @@ async function assessSome(env: BikeEnv, store: Store, s: BikeSettings): Promise<
       out.push("1 gone");
       continue;
     }
-    if (details["Art"] === "Zubehör") {
-      await setRow(db, row.ad_id, { status: "skipped", why: "accessory (Art: Zubehör)" });
-      out.push("1 accessory");
+    // the seller's category on the page itself has to agree
+    if (details["Art"] === "Zubehör" || details["Art"] === "Kinder") {
+      await setRow(db, row.ad_id, { status: "skipped", why: `Art: ${details["Art"]}` });
+      out.push(`1 ${details["Art"]}`);
       continue;
     }
 
@@ -426,10 +489,13 @@ async function deliver(tg: Telegram, row: BikeRow): Promise<void> {
 }
 
 // ---------------------------------------------------------------- status
+const lastChecked = async (store: Store) =>
+  Math.max(0, ...Object.values(await store.kvPrefix("bikes_checked:")).map(Number));
+
 export async function bikesStatus(db: D1Database, store: Store): Promise<string> {
   await ensureTable(db);
   const s = await loadBikeSettings(store);
-  const checked = Number((await store.kvGet("bikes_checked")) ?? 0);
+  const checked = await lastChecked(store);
   const until = Number((await store.kvGet("bikes_blocked_until")) ?? 0);
   const count = async (where: string, ...args: unknown[]) =>
     (await db.prepare(`SELECT COUNT(*) AS n FROM bikes WHERE ${where}`)
@@ -443,15 +509,16 @@ export async function bikesStatus(db: D1Database, store: Store): Promise<string>
 
   return [
     `🚲 <b>Bike alerts: ${s.on ? "✅ on" : "⏸ off"}</b>`,
-    `Kleinanzeigen, ${RADIUS_KM} km around Cottbus, up to <b>${s.max_price} €</b> or free.`,
-    `Every bike is read and rated out of 10 by AI before it's posted.`,
+    `Women's, men's and other adult bikes on Kleinanzeigen, ${RADIUS_KM} km around ` +
+      `Cottbus, up to <b>${s.max_price} €</b> or free. No kids' bikes, no parts.`,
+    `Each one is read and rated out of 10 by AI before it's posted.`,
     "",
     `Min rating:   ${s.min_score ? `${s.min_score}/10` : "none, all bikes"}`,
     `Last check:   ${ago} (every ${LIST_EVERY_MIN} min)`,
     ...(until > now() ? [`Backing off:  ${fmtLeft(until - now())} left`] : []),
     `Posted (24h): ${day}`,
     `Posted total: ${total}`,
-    `Filtered out: ${skipped} (parts, accessories, too pricey)`,
+    `Filtered out: ${skipped} (kids' bikes, parts, too pricey)`,
     ...(queued ? [`Being rated:  ${queued}`] : []),
     "",
     `<i>Anyone in this group can change these.</i>`,
@@ -475,7 +542,7 @@ export async function bikesLine(store: Store): Promise<string> {
   if (!s.on) return "Bike alerts:     ⏸ off  → /bikes";
   const until = Number((await store.kvGet("bikes_blocked_until")) ?? 0);
   if (until > now()) return `Bike alerts:     ⏳ back in ${fmtLeft(until - now())}`;
-  const checked = Number((await store.kvGet("bikes_checked")) ?? 0);
+  const checked = await lastChecked(store);
   return `Bike alerts:     ✅ on, ≤ ${s.max_price} €` +
     (checked ? `, checked ${fmtLeft(Math.max(0, now() - checked))} ago` : "");
 }

@@ -1,11 +1,12 @@
-// Reads a bike ad and rates it, with a cheap model: a yes/no on "is this a
-// whole bike", a 1-10 score, and the things worth knowing before you go and
-// pick it up.
+// Reads a bike ad and rates it, with a cheap model: a 1-10 score, why, and
+// the things worth knowing before you go and pick it up. The same call
+// confirms it's a whole adult bike - rules in bikes.ts already threw out the
+// obvious non-bikes, this catches what a title can't show.
 
 export interface Assessment {
   is_bike: boolean;
-  reason: string;     // why it isn't a bike, when it isn't
-  kind: string;       // "Men's city bike 28\"", "Kids' bike 16\" (~4-6 yrs)"
+  reason: string;     // why it isn't a whole adult bike, when it isn't
+  kind: string;       // "Women's city bike 28\"", "Mountain bike 26\""
   score: number;      // 1-10
   why: string;        // the score in one line: what pushed it up or down
   notes: string[];    // considerations, at most 3
@@ -19,13 +20,13 @@ export interface BikeAd {
   text: string;
 }
 
-const SYSTEM = `You screen second-hand bike listings from Kleinanzeigen around Cottbus, Germany, for a group chat of people looking for a cheap or free bike. Read the listing and return JSON only:
+const SYSTEM = `You rate second-hand adult bike listings from Kleinanzeigen around Cottbus, Germany, for a group chat of people looking for a cheap or free bike. Read the listing and return JSON only:
 
 {"is_bike": boolean, "reason": string, "kind": string, "score": integer, "why": string, "notes": [string]}
 
-is_bike: true only for a complete, rideable-as-a-whole bicycle of any size - adult, kids', balance bike, e-bike, cargo bike. false for parts and accessories (bells, horns, handlebars, grips, lights, locks, helmets, seats, saddles, tires, wheels, pedals, racks, baskets, trailers), scooters, exercise bikes, and posts searching for a bike. If false, set reason (max 8 words) and leave the rest empty/0.
+is_bike: true if the ad sells one or more complete adult bicycles - women's, men's, unisex, e-bike, cargo - that can be ridden as a whole, even if they need repair. false for parts or accessories on their own (frames, wheels, saddles, handlebars, lights, racks, clothing, tools), kids' and balance bikes, scooters, notices about stolen bikes, and posts searching for a bike. If false, set reason (max 8 words) and leave the rest empty/0.
 
-kind: short English label with type and wheel size if known, e.g. "Women's city bike 28\\"", "Kids' bike 16\\" (~4-6 yrs)", "Mountain bike 26\\"".
+kind: short English label with type and wheel size if known, e.g. "Women's city bike 28\\"", "Men's trekking bike 28\\"", "Mountain bike 26\\"".
 
 score 1-10, overall: is it worth going to get?
 - condition and completeness weigh most: ready to ride vs. needs repair, missing or broken parts
@@ -37,7 +38,7 @@ Caps: condition not described at all -> at most 6. 20 km or more away -> at most
 
 why: one short line, under 90 characters, saying what drives the score up and what pulls it down, so a reader sees at a glance why it isn't higher or lower. Name the real factors, e.g. "Looks well kept and cheap, only docked for the 26 km pickup" or "Free, but needs new brakes and tires". If distance cost points, say so here.
 
-notes: 0-3 short considerations a buyer should know, each under 60 characters, in English: defects, needed repairs, missing parts, pickup-only or time limits, frame size or rider height, age range for kids' bikes, what's included. Only what the listing says or clearly implies - never invent. Never restate the price, place or distance - they are shown already. Empty list if nothing notable.`;
+notes: 0-3 short considerations a buyer should know, each under 60 characters, in English: defects, needed repairs, missing parts, pickup-only or time limits, frame size or rider height, what's included. Only what the listing says or clearly implies - never invent. Never restate the price, place or distance - they are shown already. Empty list if nothing notable.`;
 
 export async function assessBike(apiKey: string, model: string, ad: BikeAd): Promise<Assessment> {
   let text = ad.text.trim();

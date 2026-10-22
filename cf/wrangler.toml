@@ -5,9 +5,9 @@ compatibility_date = "2026-09-01"
 # WG: one step every 2 minutes. Each step is tiny: refresh one city's
 # listing, or fetch+draft one queued ad. That keeps every invocation well
 # under the free plan's 10ms CPU budget.
-# Bikes: every 10 min on odd minutes, so it never shares a tick with the WG
-# job; the listing itself is checked every 30 min, the ticks between read and
-# rate new ads (src/bikes.ts matches on this exact string).
+# Finds (bikes, bed, Kommode): every 10 min on odd minutes, so it never
+# shares a tick with the WG job. Each tick checks the most overdue search and
+# rates up to two new ads (src/finds.ts).
 [triggers]
 crons = ["*/2 * * * *", "5,15,25,35,45,55 * * * *"]
 
@@ -18,5 +18,11 @@ database_id = "2982a6b8-3107-401c-bed5-7a30249781f6"
 
 [vars]
 OPENAI_MODEL = "gpt-5.6-terra"
-# rating bike ads is a small job: the budget model
-BIKES_MODEL = "gpt-5.6-luna"
+# rating bike and furniture ads is a small job: the budget model
+FINDS_MODEL = "gpt-5.6-luna"
+# Forum topics in the group (the number at the end of the topic's link,
+# t.me/c/<group>/<topic>). Leave one out and that kind goes to General.
+TOPIC_WG = "597"
+TOPIC_BIKE = "595"
+TOPIC_KOMMODE = "596"
+TOPIC_BED = "598"

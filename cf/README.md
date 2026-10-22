@@ -75,49 +75,78 @@ that `setWebhook` disables long-polling for that token automatically.
 Commands are identical to the Python version: `/scan`, `/more`, `/filters`,
 `/settings`, `/pause`, `/resume`, `/stats`, `/retry`.
 
+**Forum topics.** If the group has topics, each kind of post goes to its own
+one: set `TOPIC_WG`, `TOPIC_BIKE`, `TOPIC_BED`, `TOPIC_KOMMODE` in
+`wrangler.toml` to the number at the end of the topic's link
+(`t.me/c/<group>/<topic>`). Commands are answered in the topic they were
+typed in; anything without a topic (or with a deleted one) goes to General.
+
+**Is it healthy?** `curl 'https://wg-finder.<you>.workers.dev/health?ai'` answers
+`{"ok":true,"openai":"ok"}` when the deployed OpenAI key works. A rejected key
+(or no credit) also sends the group one alert - unlike a rate limit, it never
+fixes itself. Meanwhile bikes are only posted unrated when their title
+clearly names a bike, and rooms that failed can be re-drafted with `/retry`.
+
 **Bot checks are handled quietly.** When wg-gesucht or Kleinanzeigen refuses a
 request, that site (and only that site) waits and retries by itself, longer
 each time it's refused again: 45, 90, 180 minutes, up to 6 hours. The group
 isn't told - `/status` (and `/bikes`) show the countdown. Only an outage that
 has gone on for 6 hours straight sends one message, once.
 
-### Bike alerts
+### Finds: bikes, a bed, a Kommode
 
-A second, independent job (`src/bikes.ts`, `src/bikeai.ts`) posts adult bikes
-from Kleinanzeigen within 30 km of Cottbus that are free or under a price cap
-(default 30 €) to the same group. Each one is read in full and rated 1-10 by
-a cheap model (`BIKES_MODEL`, gpt-5.6-luna), with one line on why it got that
-score and the things worth knowing before you go and get it: defects, size,
-what's included, pickup limits.
+A second, independent job (`src/finds.ts`, `src/findai.ts`) posts cheap or
+free finds from Kleinanzeigen within 30 km of Cottbus to the same group, each
+with its own price cap:
+
+| | What | Default cap |
+|---|---|---|
+| 🚲 | adult bikes (Damen, Herren, Weiteres) | 30 € |
+| 🛏 | a bed frame for a 140×200 mattress (category Betten) | 100 € |
+| 🗄 | a Kommode / chest of drawers (keyword search) | 35 € |
+
+Each one is read in full and rated 1-10 by a cheap model (`FINDS_MODEL`,
+gpt-5.6-luna), with one line on why it got that score and what's worth
+knowing before you go and get it.
 
 What gets through is decided mostly without AI:
 
-1. The searches ask for the seller's own category - Damen, Herren and
-   Weiteres - so kids' bikes and accessories are never fetched.
-2. Title rules reject what's obvious: part words (Reifen, Felge, Sattel…),
-   "Fahrrad…" compounds (Fahrradlenker, Fahrradnavi), kids' markers, and
-   accessories named before any bike.
-3. The ad page's own "Art" field must not say Kinder or Zubehör.
+1. Searches use the seller's own category where there is one (bikes:
+   Damen/Herren/Weiteres; beds: Betten), so kids' bikes, accessories and
+   mattresses on their own are never fetched.
+2. Title rules reject what's obvious - bike parts and "Fahrrad…" compounds,
+   kids' markers; beds of another size, bunk/pet beds, slats or mattresses
+   alone; changing tables and wardrobe inserts.
+3. The ad page's own "Art" field has to agree.
 4. Ads that were already more than 2 days old when first seen are stored
    quietly: no backlog flood when a search starts, no pinned "TOP" ads.
 
 Only what's left reaches the AI, in the one call it needs anyway for the
-rating; that call also confirms it's a whole bike, which settles the titles
-rules can't ("Cervelo ZFS-5", or a part listing that says "Fahrrad").
+rating; that call also confirms it's the right thing (it reads the bed size
+from the description, tells a Kommode from a nightstand).
 
 It runs on its own cron (every 10 min on odd minutes), so it never shares a
-tick or CPU budget with the WG job. Each tick checks one of the three
-searches (each every 30 min) and reads and rates at most two new ads. It keeps its own
+tick or CPU budget with the WG job. Each tick checks the most overdue search
+(bikes every 30 min, Weiteres every 2 h, bed and Kommode hourly) and reads
+and rates at most two new ads. It keeps its own
 backoff and cookie jar: if Kleinanzeigen rate-limits the bike search, the WG
 search is not paused. While the WG search is itself being limited by
 Kleinanzeigen, the bike job sits those runs out rather than make it worse.
 Only one bike run works at a time (a lock in D1 that expires after 5 min), so
 overlapping triggers or a tap on "Check now" can't post a bike twice.
 
-`/bikes` is open to **everyone in the group** (all other commands stay
-owner-only): it shows the state with buttons for the price cap, a minimum
-rating, pause and check-now. Also `/bikes price 30`, `/bikes min 5`,
-`/bikes on|off|now`. It ignores `/pause`, which only stops the room search.
+`/finds` is open to **everyone in the group** (all other commands stay
+owner-only): a card with − / + price buttons and a pause button per item, a
+minimum rating, and check-now. Also `/finds bed 80`, `/finds kommode off`,
+`/finds min 5`, `/finds now`; `/bikes` still works for the bikes. It ignores
+`/pause`, which only stops the room search.
+
+## Tests
+
+    npm test
+
+Offline tests for the finds job and its wiring (Node 22.6+): synthetic
+Kleinanzeigen pages, an in-memory D1, and recorded OpenAI/Telegram calls.
 
 ## Local development
 

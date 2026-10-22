@@ -1,5 +1,6 @@
 // Free and cheap finds around Cottbus - adult bikes, a 140×200 bed, a
-// Kommode - rated by AI, straight to Telegram.
+// Kommode, and anything free that's useful for a student's room - rated by
+// AI, straight to Telegram.
 //
 // Kept apart from the WG search on purpose:
 //   - its own cron (odd minutes), which never lands on the WG job's
@@ -18,7 +19,7 @@
 
 import { Blocked, get, type CookieJar } from "./scraper.ts";
 import { parseListing, parseAd } from "./kleinanzeigen.ts";
-import { assessItem, type ItemKey } from "./findai.ts";
+import { assessItem, screenFree, type ItemKey } from "./findai.ts";
 import { aiFailed, aiWorked } from "./aikey.ts";
 import {
   blockSecondsLeft, dueOutageNotice, endOutage, fmtLeft, noteBlock, outageHours,
@@ -44,6 +45,7 @@ export interface FindsEnv {
   TOPIC_BIKE?: string;
   TOPIC_BED?: string;
   TOPIC_KOMMODE?: string;
+  TOPIC_FREE?: string;
 }
 
 const topicOf = (env: FindsEnv, item: ItemKey): number | undefined =>
@@ -212,15 +214,96 @@ export const namesKommode = (title: string) => {
   return KOMMODE_LIKE.test(t) && !KOMMODE_UNSURE.test(t) && !KOMMODE_NOT.test(t);
 };
 
+// ================================================================ free stuff
+// The free category ("Zu verschenken") is mostly junk with the odd gem. Three
+// tiers keep the AI bill small:
+//   - junk by title is dropped here (stones, clothes, kids' things, sofas…)
+//   - a title naming something on the wishlist goes straight to a full rating
+//   - everything vague ("Verschiedenes zu verschenken") is screened in one
+//     batched AI call per check, titles and previews only; just the ones that
+//     pass get their page read and rated
+// Free beds, Kommoden and bikes go to their own items and topics instead.
+
+// Whole words only - as word endings these hit good ads: "Versand" ends in
+// "sand", "Preis" in "reis", "Massivholz" in "holz", "Schallplatten" in "platten".
+const FREE_JUNK_WORD = new Set([
+  "kleid", "anzug", "socken", "bh", "jeans", "mütze", "schal", "dirndl",
+  "kaktus", "ableger", "samen", "baum", "bäume", "topper", "pool", "boot", "trockner", "herd",
+  "kind", "lego", "katze", "katzen", "hund", "hunde", "kaninchen", "meerschweinchen", "aquarium",
+  "terrarium", "kratzbaum", "kies", "sand", "erde", "holz", "platten", "paletten",
+  "beton", "bild", "bilder", "rad", "fahrrad", "fahrräder", "auto", "kfz", "rollator", "rollstuhl",
+  "hochstuhl", "wickeltisch", "stillkissen", "sammelbecher", "zeitschriften", "zeitungen", "katalog",
+  "flohmarkt", "haushaltsauflösung", "wohnungsauflösung", "basar", "figur", "figuren",
+]);
+// Compound endings that are junk whatever comes before ("Kinderschuhe", "Zimmerpflanze")
+const FREE_JUNK_END = [
+  "kleidung", "kleider", "hose", "hosen", "jacke", "jacken", "mantel", "pullover", "pulli", "shirt",
+  "bluse", "schuhe", "stiefel", "sneaker", "unterwäsche", "jogginganzug",
+  "pflanze", "pflanzen", "blumen", "setzlinge",
+  "matratze", "matratzen", "sofa", "couch", "wohnlandschaft", "kleiderschrank", "schrankwand",
+  "wohnwand", "küche", "küchenzeile", "waschmaschine", "kühlschrank", "gefrierschrank",
+  "gefriertruhe", "spülmaschine", "geschirrspüler", "klavier", "trampolin", "wohnwagen",
+  "spielzeug", "puppe", "puppen", "kinderwagen", "buggy", "laufstall", "schnuller", "windeln",
+  "umstandsmode", "futter", "brennholz", "feuerholz", "holzreste", "schotter", "findling", "schutt",
+  "folie", "fliesen", "dachziegel", "spanplatten", "reifen", "zaun", "rasenmäher", "gartenmöbel",
+  "gartenschlauch", "deko", "dekoration", "kranz", "stein", "steine",
+];
+const FREE_JUNK_RX = /\b(suche|gesucht|tausche)\b|weihnacht|ostern|advent|kinder|baby|\bgr(öße|\.)?\s?\d{2}\b/;
+// clearly something a new student can use: straight to a full rating
+const FREE_WANT_WORD = new Set(["reis", "tee", "maus", "buch", "tisch", "decke", "decken", "obst"]);
+const FREE_WANT_END = [
+  "schreibtisch", "bürostuhl", "stuhl", "stühle", "regal", "kleiderstange", "nachttisch",
+  "garderobe", "spiegel", "sessel", "hocker",
+  "bettdecke", "kissen", "bettwäsche", "handtuch", "handtücher", "vorhang", "vorhänge", "gardine",
+  "gardinen", "teppich",
+  "topf", "töpfe", "pfanne", "pfannen", "geschirr", "teller", "tassen", "becher", "gläser", "besteck",
+  "messer", "schneidebrett", "wasserkocher", "toaster", "kaffeemaschine", "kaffeevollautomat",
+  "mikrowelle", "mixer", "reiskocher", "sandwichmaker", "waffeleisen", "schüssel", "schüsseln",
+  "vorratsdosen",
+  "staubsauger", "wäscheständer", "bügeleisen", "bügelbrett", "wäschekorb", "kleiderbügel",
+  "mülleimer", "steckdosenleiste", "mehrfachsteckdose", "verlängerungskabel", "ventilator",
+  "heizlüfter", "lampe", "lampen", "lampenschirm", "leuchte", "monitor", "bildschirm", "tastatur", "drucker",
+  "lautsprecher", "kopfhörer", "laptop", "notebook", "tablet", "handy", "smartphone", "ipad",
+  "kamera", "konsole", "playstation", "xbox", "nintendo", "fernseher", "radio", "router",
+  "bücher", "lehrbuch", "wörterbuch", "brettspiel", "brettspiele", "gitarre", "keyboard",
+  "ukulele", "yogamatte", "hanteln", "zelt", "schlafsack", "rucksack", "koffer",
+  "lebensmittel", "nudeln", "konserven", "gemüse", "kaffee",
+];
+const isWant = (w: string) => FREE_WANT_WORD.has(w) || FREE_WANT_END.some((x) => w.endsWith(x));
+// bikes and bike gear have their own topic: "Fahrradschloss", "Fahrradhelm"
+const isJunk = (w: string) =>
+  FREE_JUNK_WORD.has(w) || FAHRRAD_THING(w) || (FREE_JUNK_END.some((x) => w.endsWith(x)) && !isWant(w));
+
+export function freeRejectReason(title: string): string | null {
+  const t = lower(title);
+  if (FREE_JUNK_RX.test(t)) return "not for a student's room";
+  const bad = words(t).find(isJunk);
+  return bad ? `not for a student's room (${bad})` : null;
+}
+
+/** Names something on the wishlist: worth a full rating without screening. */
+export const namesFree = (title: string) => !freeRejectReason(title) && words(lower(title)).some(isWant);
+
+/** A free ad that's really a bed, a Kommode or a bike belongs to that item. */
+export function routeFree(title: string): ItemKey | null {
+  const t = lower(title);
+  if (words(t).some(isBedWord) && !bedRejectReason(title)) return "bed";
+  if (KOMMODE_LIKE.test(t) && !kommodeRejectReason(title)) return "kommode";
+  if (namesBike(title) && !rejectReason(title)) return "bike";
+  return null;
+}
+
 // ================================================================ the items
 interface Search { id: string; every: number; url: (max: number) => string }
 export interface Item {
   key: ItemKey;
   emoji: string;
   label: string;          // on the /finds card
-  kv: string;             // settings keys: <kv>_on, <kv>_max_price
+  kv: string;             // settings keys: <kv>_on, <kv>_max_price, <kv>_floor
+  priced: boolean;        // has a price cap; free stuff has a rating floor instead
   defaultMax: number;
-  step: number;           // € per tap on the card
+  defaultFloor: number;   // only post from this rating up
+  step: number;           // € (or ⭐ for free stuff) per tap on the card
   searches: Search[];
   reject: (title: string) => string | null;   // clearly not it, by title
   named: (title: string) => boolean;          // clearly it - may go out unrated without AI
@@ -236,7 +319,7 @@ const fahrrad = (art: string) => (max: number) =>
 // ads appear between two checks, so page 1 is enough.
 export const ITEMS: Item[] = [
   {
-    key: "bike", emoji: "🚲", label: "Bikes", kv: "bikes", defaultMax: 30, step: 5,
+    key: "bike", emoji: "🚲", label: "Bikes", kv: "bikes", priced: true, defaultMax: 30, defaultFloor: 0, step: 5,
     // "Weiteres" is mostly parts, so it isn't worth the requests as often
     searches: [
       { id: "damen", every: 30, url: fahrrad("damen") },
@@ -247,7 +330,7 @@ export const ITEMS: Item[] = [
     page: (d) => (d["Art"] === "Zubehör" || d["Art"] === "Kinder" ? `Art: ${d["Art"]}` : null),
   },
   {
-    key: "bed", emoji: "🛏", label: "Bed 140×200", kv: "bed", defaultMax: 100, step: 10,
+    key: "bed", emoji: "🛏", label: "Bed 140×200", kv: "bed", priced: true, defaultMax: 100, defaultFloor: 0, step: 10,
     searches: [{
       id: "bed", every: 60,
       url: (max) => `https://www.kleinanzeigen.de/s-schlafzimmer/betten/cottbus/anzeige:angebote/` +
@@ -257,13 +340,22 @@ export const ITEMS: Item[] = [
     page: (d) => (d["Art"] && d["Art"] !== "Betten" ? `Art: ${d["Art"]}` : null),
   },
   {
-    key: "kommode", emoji: "🗄", label: "Kommode", kv: "kommode", defaultMax: 35, step: 5,
+    key: "kommode", emoji: "🗄", label: "Kommode", kv: "kommode", priced: true, defaultMax: 35, defaultFloor: 0, step: 5,
     searches: [{
       id: "kommode", every: 60,
       url: (max) => `https://www.kleinanzeigen.de/s-haus-garten/cottbus/anzeige:angebote/` +
         `preis::${max}/kommode/k0c80l7743r${RADIUS_KM}`,
     }],
     reject: kommodeRejectReason, named: namesKommode,
+  },
+  {
+    // a lot comes in and most of it is junk: only the well-rated ones go out
+    key: "free", emoji: "🎁", label: "Free stuff", kv: "free", priced: false, defaultMax: 0, defaultFloor: 6, step: 1,
+    searches: [{
+      id: "free", every: 30,
+      url: () => `https://www.kleinanzeigen.de/s-zu-verschenken/cottbus/anzeige:angebote/c192l7743r${RADIUS_KM}`,
+    }],
+    reject: freeRejectReason, named: namesFree,
   },
 ];
 const ITEM = Object.fromEntries(ITEMS.map((i) => [i.key, i])) as Record<ItemKey, Item>;
@@ -275,13 +367,14 @@ export function parseItem(word: string): ItemKey | null {
   if (/^(bikes?|fahrr(ad|äder)|rad)$/.test(w)) return "bike";
   if (/^(beds?|bett(en)?)$/.test(w)) return "bed";
   if (/^(kommoden?|dressers?|drawers?)$/.test(w)) return "kommode";
+  if (/^(free|gratis|umsonst|verschenken)$/.test(w)) return "free";
   return null;
 }
 
 // ---------------------------------------------------------------- settings
 export interface FindSettings {
   min_score: number;
-  items: Record<ItemKey, { on: boolean; max: number }>;
+  items: Record<ItemKey, { on: boolean; max: number; floor: number }>;
 }
 
 export async function loadFindSettings(store: Store): Promise<FindSettings> {
@@ -292,12 +385,24 @@ export async function loadFindSettings(store: Store): Promise<FindSettings> {
   };
   const items = {} as FindSettings["items"];
   for (const i of ITEMS)
-    items[i.key] = { on: (await store.kvGet(`${i.kv}_on`)) !== "0", max: await num(`${i.kv}_max_price`, i.defaultMax) };
+    items[i.key] = {
+      on: (await store.kvGet(`${i.kv}_on`)) !== "0",
+      max: await num(`${i.kv}_max_price`, i.defaultMax),
+      floor: await num(`${i.kv}_floor`, i.defaultFloor),
+    };
   return { min_score: await num("bikes_min_score", 0), items };
 }
 
-/** Max price for an item, or the minimum rating ("min") for all of them. */
+/**
+ * Max price for an item, the minimum rating ("min") for all of them, or for
+ * free stuff - which has no price - its own minimum rating.
+ */
 export async function setFindSetting(store: Store, key: ItemKey | "min", value: number): Promise<string> {
+  if (key !== "min" && !ITEM[key].priced) {
+    const v = Math.min(10, Math.max(0, Math.round(value)));
+    await store.kvSet(`${ITEM[key].kv}_floor`, String(v));
+    return `${ITEM[key].emoji} ${ITEM[key].label}: only ⭐ ${v}/10 or better`;
+  }
   if (key === "min") {
     const v = Math.min(10, Math.max(0, Math.round(value)));
     await store.kvSet("bikes_min_score", String(v));
@@ -439,6 +544,8 @@ export async function findsStep(
         .reduce((x, y) => (y[2] > x[2] ? y : x));
       if (forceList || overdue >= 0)
         did.push(await checkListing(db, store, s, item, search));
+      const screened = await screenSome(env, store, tg);
+      if (screened) did.push(screened);
       did.push(await assessSome(env, store, s, tg));
     } catch (e) {
       if (!(e instanceof Blocked)) throw e;
@@ -447,7 +554,7 @@ export async function findsStep(
     await endOutage(store, "bikes");
 
     const sent = await sendReady(env, tg, s);
-    if (did.length > 1 && did[1] === "nothing to rate") did.pop();
+    if (did.length > 1 && did.at(-1) === "nothing to rate") did.pop();
     return `finds: ${did.join(", ")}${sent ? `, ${sent} sent` : ""}`;
   } finally {
     await store.kvSet("bikes_lock", "0");
@@ -457,8 +564,7 @@ export async function findsStep(
 async function checkListing(
   db: D1Database, store: Store, s: FindSettings, item: Item, search: Search,
 ): Promise<string> {
-  const max = s.items[item.key].max;
-  const html = await get(search.url(max), jar(store));
+  const html = await get(search.url(s.items[item.key].max), jar(store));
   // only once it worked: after a block the next tick should look again
   await store.kvSet("bikes_checked:" + search.id, String(now()));
   const ads = parseListing(html);
@@ -478,22 +584,61 @@ async function checkListing(
     fresh++;
     const price = priceEur(ad.rent);
     const km = distanceKm(ad.district);
+    // a free ad that's really a bed, Kommode or bike joins that item
+    const routed = item.key === "free" ? routeFree(ad.title) : null;
+    const it = routed ? ITEM[routed] : item;
     const why =
-      price !== null && price > max ? `price ${ad.rent}`
+      routed && !s.items[routed].on ? "paused"
+      : it.priced && price !== null && price > s.items[it.key].max ? `price ${ad.rent}`
       // a thin result page gets padded with ads from far away
       : km !== null && km > RADIUS_KM + 5 ? `too far (${km} km)`
       // no flood of old ads when a search starts, no pinned "TOP" ads
       : isStale(posted.get(ad.ad_id)) ? `old ad (${posted.get(ad.ad_id)})`
-      : item.reject(ad.title);
+      : it.reject(ad.title);
     if (!why) maybe++;
+    // vague free ads wait for the batched screen; wishlist titles skip it
+    const status = why ? "skipped" : it.key === "free" && !namesFree(ad.title) ? "screen" : "new";
     await db.prepare(
       `INSERT OR IGNORE INTO bikes
          (ad_id,url,title,price,place,image,snippet,status,why,first_seen,item)
        VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
       .bind(ad.ad_id, ad.url, ad.title, ad.rent, ad.district, ad.image,
-            ad.snippet ?? "", why ? "skipped" : "new", why, now(), item.key).run();
+            ad.snippet ?? "", status, why, now(), it.key).run();
   }
   return `${search.id} ${ads.length} ads, ${fresh} new, ${maybe} to rate`;
+}
+
+/**
+ * The vague free ads, all in one cheap AI call on title + preview. Passing
+ * (5/10 and up) means a full read and rating; the rest are dropped unread.
+ */
+async function screenSome(env: FindsEnv, store: Store, tg: Telegram): Promise<string> {
+  const db = env.DB;
+  const { results } = await db.prepare(
+    `SELECT * FROM bikes WHERE status='screen' ORDER BY first_seen, rowid LIMIT 12`).all<FindRow>();
+  const rows = results ?? [];
+  if (!rows.length) return "";
+  try {
+    const verdicts = await screenFree(env.OPENAI_API_KEY, env.FINDS_MODEL || "gpt-5.6-luna",
+      rows.map((r) => ({ id: r.ad_id, title: r.title, snippet: r.snippet })));
+    await aiWorked(store);
+    let pass = 0;
+    for (const r of rows) {
+      const v = verdicts.get(r.ad_id);
+      if (v && v.score >= 5) { pass++; await setRow(db, r.ad_id, { status: "new" }); }
+      else await setRow(db, r.ad_id, { status: "skipped", why: `screen: ${v ? `${v.score}/10 ${v.reason}` : "no verdict"}` });
+    }
+    return `screened ${rows.length} free, ${pass} worth a look`;
+  } catch (e: any) {
+    await aiFailed(store, tg, e);
+    // a few tries, then give up on them: vague and unchecked isn't worth posting
+    for (const r of rows)
+      await setRow(db, r.ad_id, r.attempts + 1 >= MAX_ATTEMPTS
+        ? { attempts: r.attempts + 1, status: "skipped", why: "unsure, and no AI to ask" }
+        : { attempts: r.attempts + 1 });
+    console.error("free screen failed:", e?.message ?? e);
+    return "screen failed";
+  }
 }
 
 /** Read the full ad; the AI confirms it's what we want and rates it. Two per tick. */
@@ -512,7 +657,7 @@ async function assessSome(
     const item = itemOf(row);
     // paused, or its max price lowered, since it was listed
     const price = priceEur(row.price);
-    if (!s.items[item.key].on || (price !== null && price > s.items[item.key].max)) {
+    if (!s.items[item.key].on || (item.priced && price !== null && price > s.items[item.key].max)) {
       await setRow(db, row.ad_id, { status: "skipped", why: s.items[item.key].on ? `price ${row.price}` : "paused" });
       continue;
     }
@@ -596,7 +741,8 @@ async function sendReady(env: FindsEnv, tg: Telegram, s: FindSettings): Promise<
       await setRow(db, row.ad_id, { status: "skipped", why: "paused" });
       continue;
     }
-    if (s.min_score && row.score !== null && row.score < s.min_score) {
+    const floor = Math.max(s.min_score, s.items[itemOf(row).key].floor);
+    if (floor && row.score !== null && row.score < floor) {
       await setRow(db, row.ad_id, { status: "skipped", why: `rated ${row.score}/10` });
       continue;
     }
@@ -628,7 +774,7 @@ function caption(row: FindRow): string {
   const snip = row.snippet.length > 140 ? row.snippet.slice(0, 140).trimEnd() + "…" : row.snippet;
   return (
     `${item.emoji} <b>${esc(row.title || item.label)}</b>\n` +
-    (free ? "🆓 <b>Zu verschenken</b>" : `<b>${esc(row.price || "price?")}</b>`) +
+    (free ? "🆓 <b>Free</b>" : `<b>${esc(row.price || "price?")}</b>`) +
     ` · ${esc(row.place || "?")}\n` +
     `${rating}\n` +
     (row.rating_why ? `<i>${esc(row.rating_why)}</i>\n` : "") +
@@ -660,6 +806,7 @@ const WHAT: Record<ItemKey, string> = {
   bike: "adult bikes, no kids' bikes or parts",
   bed: "frame, with or without slats",
   kommode: "chest of drawers",
+  free: "anything a new student can use",
 };
 
 export async function findsStatus(db: D1Database, store: Store): Promise<string> {
@@ -676,7 +823,7 @@ export async function findsStatus(db: D1Database, store: Store): Promise<string>
     day.push(`${i.emoji} ${await count("status='sent' AND sent_at > ? AND coalesce(item,'bike') = ?", now() - 86400, i.key)}`);
   const total = await count("status='sent'");
   const skipped = await count("status='skipped'");
-  const queued = await count("status IN ('new','ready')");
+  const queued = await count("status IN ('screen','new','ready')");
   const ago = checked ? `${fmtLeft(Math.max(0, now() - checked))} ago` : "not yet";
 
   return [
@@ -685,7 +832,7 @@ export async function findsStatus(db: D1Database, store: Store): Promise<string>
     ...ITEMS.map((i) => {
       const it = s.items[i.key];
       return `${i.emoji} <b>${i.label}</b> (${WHAT[i.key]}): ` +
-        (it.on ? `up to <b>${it.max} €</b> or free` : "⏸ paused");
+        (!it.on ? "⏸ paused" : i.priced ? `up to <b>${it.max} €</b> or free` : `free, rated <b>${it.floor}/10</b> or better`);
     }),
     "",
     `Each one is read and rated out of 10 by AI before it's posted.`,
@@ -704,9 +851,10 @@ export async function findsStatus(db: D1Database, store: Store): Promise<string>
 export const findsKeyboard = (s: FindSettings): Button[][] => [
   ...ITEMS.map((i) => {
     const it = s.items[i.key];
+    const what = !it.on ? "paused" : i.priced ? `≤ ${it.max} €` : `⭐ ≥ ${it.floor}`;
     return [
       { text: `${i.emoji} −${i.step}`, callback_data: `bk:price:${i.key}:-${i.step}` },
-      { text: it.on ? `≤ ${it.max} €` : "paused", callback_data: "bk:noop" },
+      { text: what, callback_data: "bk:noop" },
       { text: `+${i.step}`, callback_data: `bk:price:${i.key}:+${i.step}` },
       { text: it.on ? "⏸" : "▶️", callback_data: `bk:${it.on ? "off" : "on"}:${i.key}` },
     ];
@@ -725,6 +873,6 @@ export async function findsLine(store: Store): Promise<string> {
   const until = Number((await store.kvGet("bikes_blocked_until")) ?? 0);
   if (until > now()) return `Finds:           ⏳ back in ${fmtLeft(until - now())}`;
   const checked = await lastChecked(store);
-  return `Finds:           ✅ ${on.map((i) => `${i.emoji} ≤ ${s.items[i.key].max} €`).join(" · ")}` +
+  return `Finds:           ✅ ${on.map((i) => `${i.emoji} ${i.priced ? `≤ ${s.items[i.key].max} €` : `⭐ ≥ ${s.items[i.key].floor}`}`).join(" · ")}` +
     (checked ? `, checked ${fmtLeft(Math.max(0, now() - checked))} ago` : "");
 }

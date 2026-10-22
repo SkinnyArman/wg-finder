@@ -76,7 +76,7 @@ Commands are identical to the Python version: `/scan`, `/more`, `/filters`,
 `/settings`, `/pause`, `/resume`, `/stats`, `/retry`.
 
 **Forum topics.** If the group has topics, each kind of post goes to its own
-one: set `TOPIC_WG`, `TOPIC_BIKE`, `TOPIC_BED`, `TOPIC_KOMMODE` in
+one: set `TOPIC_WG`, `TOPIC_BIKE`, `TOPIC_BED`, `TOPIC_KOMMODE`, `TOPIC_FREE` in
 `wrangler.toml` to the number at the end of the topic's link
 (`t.me/c/<group>/<topic>`). Commands are answered in the topic they were
 typed in; anything without a topic (or with a deleted one) goes to General.
@@ -93,7 +93,7 @@ each time it's refused again: 45, 90, 180 minutes, up to 6 hours. The group
 isn't told - `/status` (and `/bikes`) show the countdown. Only an outage that
 has gone on for 6 hours straight sends one message, once.
 
-### Finds: bikes, a bed, a Kommode
+### Finds: bikes, a bed, a Kommode, free stuff
 
 A second, independent job (`src/finds.ts`, `src/findai.ts`) posts cheap or
 free finds from Kleinanzeigen within 30 km of Cottbus to the same group, each
@@ -104,6 +104,7 @@ with its own price cap:
 | 🚲 | adult bikes (Damen, Herren, Weiteres) | 30 € |
 | 🛏 | a bed frame for a 140×200 mattress (category Betten) | 100 € |
 | 🗄 | a Kommode / chest of drawers (keyword search) | 35 € |
+| 🎁 | anything free a new student can use for their room (category Zu verschenken) | rated 6/10+ |
 
 Each one is read in full and rated 1-10 by a cheap model (`FINDS_MODEL`,
 gpt-5.6-luna), with one line on why it got that score and what's worth
@@ -124,6 +125,14 @@ What gets through is decided mostly without AI:
 Only what's left reaches the AI, in the one call it needs anyway for the
 rating; that call also confirms it's the right thing (it reads the bed size
 from the description, tells a Kommode from a nightstand).
+
+Free stuff comes in fast and is mostly junk, so it has one more tier: titles
+that are clearly junk (stones, clothes, plants, sofas, kids' things) are
+dropped, titles naming something on the wishlist (kettle, desk, monitor…) go
+straight to a full rating, and vague ones ("Verschiedenes zu verschenken") are
+screened together in one cheap AI call from their title and preview. Free
+beds, Kommoden and bikes are handed to their own items and topics. Only free
+finds rated 6/10 or better are posted; the card's ⭐ buttons move that bar.
 
 It runs on its own cron (every 10 min on odd minutes), so it never shares a
 tick or CPU budget with the WG job. Each tick checks the most overdue search

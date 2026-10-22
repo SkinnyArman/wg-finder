@@ -35,6 +35,7 @@ export interface Env {
   TOPIC_BIKE?: string;
   TOPIC_BED?: string;
   TOPIC_KOMMODE?: string;
+  TOPIC_FREE?: string;
 }
 
 const wgTopic = (env: Env) => inTopic(Number(env.TOPIC_WG) || null);
@@ -584,8 +585,10 @@ async function handleFinds(update: any, env: Env, tg: Telegram, store: Store): P
     const item: ItemKey = (parseItem(a ?? "") ?? "bike");
     let toast = "";
     if (act === "price") {
+      // free stuff has no price: its +/− moves the rating it needs instead
       const delta = Number(b ?? a);
-      toast = await setFindSetting(store, item, s.items[item].max + delta);
+      const priced = ITEMS.find((i) => i.key === item)!.priced;
+      toast = await setFindSetting(store, item, (priced ? s.items[item].max : s.items[item].floor) + delta);
     } else if (act === "min") toast = await setFindSetting(store, "min", s.min_score + Number(a));
     else if (act === "on" || act === "off") toast = await setItemOn(store, item, act === "on");
     else if (act === "now") toast = await checkNow();
@@ -602,7 +605,7 @@ async function handleFinds(update: any, env: Env, tg: Telegram, store: Store): P
     tg.send(t, { ...sameTopic(update.message), ...o }, chat);
   const [cmdRaw, sub = "", val = ""] = update.message.text.trim().split(/\s+/);
   const isBikes = /^\/bikes/i.test(cmdRaw);
-  const usage = "Try /finds, /finds bed 80, /finds kommode 40, /finds bike off, /finds min 5, /finds now";
+  const usage = "Try /finds, /finds bed 80, /finds kommode 40, /finds free 7 (min rating), /finds bike off, /finds min 5, /finds now";
   const lsub = sub.toLowerCase();
   const item = parseItem(lsub);
 

@@ -70,10 +70,25 @@ const KOMMODEN = page([
   [506, "Ikea Kommode für Pax", "Zu verschenken", "03149 Forst (Lausitz)", 21, "Gestern, 07:00"],
   [507, "Kommode weiß", "30 €", "03044 Cottbus", 2, "05.10.2026"],
 ]);
+const FREE = page([
+  [601, "Verschiedenes zum Verschenken", "Zu verschenken", "03050 Cottbus", 3, "Heute, 12:33"],        // vague → screen
+  [602, "Lampenschirm zu verschenken", "Zu verschenken", "03046 Cottbus", 1, "Heute, 06:58"],          // rated 5: held back
+  [603, "diverse Teller, Tassen, Kannen zu verschenken", "Zu verschenken", "03229 Luckaitztal", 25, "Heute, 01:09"],
+  [604, "12t Granit-Stein zu verschenken", "Zu verschenken", "03130 Spremberg", 20, "Gestern, 16:51"],
+  [605, "Nike Jogginganzug zu verschenken", "Zu verschenken", "03046 Cottbus", 1, "Heute, 06:53"],
+  [606, "nur noch Doppelbett mit Lattenroste zu verschenken", "Zu verschenken", "03042 Cottbus", 6, "Gestern, 18:00"],
+  [607, "Monitor 24 Zoll", "Zu verschenken", "03046 Cottbus", 1, "Heute, 05:00"],
+  [608, "Klebetapete", "Zu verschenken", "03046 Cottbus", 1, "Gestern, 18:30"],                         // vague → screened out
+  [609, "Pflanzen zu verschenken", "Zu verschenken", "03226 Vetschau", 19, "Heute, 06:45"],
+  [610, "Einbauküche gebraucht zu verschenken", "Zu verschenken", "02979 Elsterheide", 30, "Gestern, 10:57"],
+  [611, "Fahrradschloss", "Zu verschenken", "03046 Cottbus", 1, "Gestern, 09:00"],
+  [612, "Schallplatten Sammlung Rock", "Zu verschenken", "03048 Cottbus", 3, "Gestern, 08:00"],          // vague → passes
+  [613, "Kaffeemaschine", "Zu verschenken", "03048 Cottbus", 3, "05.10.2026"],
+]);
 const PAGES = { damen: DAMEN, herren: HERREN, weiteres: WEITERES, betten: BETTEN };
 // the seller's category on each ad page; Kommoden come from a keyword search: none
 const ART = {};
-for (const [html, art] of [[BETTEN, "Betten"], [KOMMODEN, null]])
+for (const [html, art] of [[BETTEN, "Betten"], [KOMMODEN, null], [FREE, null]])
   for (const m of html.matchAll(/data-href="\/s-anzeige\/([^/]+)\//g)) ART[m[1]] = art;
 const adPage = (art, text = "Gebraucht, guter Zustand, alles funktioniert. Nur Abholung, bitte bis Ende der Woche melden.") =>
   `<html><p id="viewad-description-text" class="x">${text}</p><ul>` +
@@ -96,7 +111,7 @@ function makeDB() {
 
 // ---------------------------------------------------------------- network
 const net = { wgKa: "ok", ka: "ok", detailBlock: false, tgFailAfter: Infinity, ai: "ok",
-              aiTitles: [], aiItems: [], kaHits: [], tgCalls: [], gone: new Set(), art: {} };
+              aiTitles: [], aiItems: [], screens: [], kaHits: [], tgCalls: [], gone: new Set(), art: {} };
 globalThis.fetch = async (url, init = {}) => {
   url = String(url);
   if (url.includes("kleinanzeigen.de")) {
@@ -113,6 +128,7 @@ globalThis.fetch = async (url, init = {}) => {
       return new Response(DAMEN, { status: 200 });
     }
     if (url.includes("/kommode/k0c80l7743r30")) return new Response(KOMMODEN, { status: 200 });
+    if (url.includes("/s-zu-verschenken/")) return new Response(FREE, { status: 200 });
     const art = /art_s:(\w+)/.exec(url)?.[1];
     assert.ok(PAGES[art], "listing for an unexpected search: " + url);
     return new Response(PAGES[art], { status: 200, headers: { "set-cookie": "sess=abc; Path=/" } });
@@ -121,12 +137,21 @@ globalThis.fetch = async (url, init = {}) => {
     return new Response("{}", { status: net.ai === "401" ? 401 : 200 });
   if (url.includes("api.openai.com")) {
     const body = JSON.parse(init.body);
-    const title = /Title: (.*)/.exec(body.messages[1].content)[1];
+    const title = /Title: (.*)/.exec(body.messages[1].content)?.[1] ?? "";
     const sys = body.messages[0].content;
+    if (/You screen free giveaway ads/.test(sys)) {                        // the batched screen
+      net.screens.push(body.messages[1].content);
+      if (net.ai === "down") return new Response('{"error":"overloaded"}', { status: 503 });
+      if (net.ai === "401") return new Response('{"error":{"message":"Incorrect API key provided"}}', { status: 401 });
+      const ads = [...body.messages[1].content.matchAll(/id: (\S+)\ntitle: (.*)/g)].map(([, id, title]) =>
+        ({ id, score: /Verschiedenes/.test(title) ? 6 : /Schallplatten/.test(title) ? 5 : 1, reason: "test" }));
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ ads }) } }] }));
+    }
     if (!/listings from Kleinanzeigen around Cottbus/.test(sys))          // a WG draft, not a find
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(
         { language: "de", ad_summary: "", facts_used: [], thin_ad: false, message: "Hallo, ich bin Arman!" }) } }] }));
-    const item = /adult bike listings/.test(sys) ? "bike" : /bed \(140×200\)/.test(sys) ? "bed" : "kommode";
+    const item = /adult bike listings/.test(sys) ? "bike" : /bed \(140×200\)/.test(sys) ? "bed"
+      : /free giveaway listings/.test(sys) ? "free" : "kommode";
     net.aiTitles.push(title); net.aiItems.push(item);
     if (net.ai === "down") return new Response('{"error":"overloaded"}', { status: 503 });
     if (net.ai === "401") return new Response('{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}', { status: 401 });
@@ -135,8 +160,12 @@ globalThis.fetch = async (url, init = {}) => {
       : /Vorkrieg/.test(title) ? { is_match: false, reason: "pedals and parts only" }
       : /Nachttisch/.test(title) ? { is_match: false, reason: "small nightstand" }
       : item === "bed" ? { is_match: true, kind: /Doppelbett/.test(title) ? "Wooden double bed" : "IKEA Brimnes bed 140×200",
-          score: /Doppelbett/.test(title) ? 6 : 7,       // over the cap for an unstated size why: "Cheap and close, slats included",
+          score: /Doppelbett/.test(title) ? 6 : 7,       // 6: over the cap for an unstated size
+          why: "Cheap and close, slats included",
           notes: /Doppelbett/.test(title) ? ["Size not stated - ask"] : ["4 drawers underneath"] }
+      : item === "free" ? { is_match: true, kind: /Teller/.test(title) ? "Kitchen set: plates, cups" : "Useful bits",
+          score: /Teller/.test(title) ? 8 : /Monitor/.test(title) ? 7 : /Lampenschirm/.test(title) ? 5 : 6,
+          why: "Free and close, easy to carry", notes: ["Complete set"] }
       : item === "kommode" ? { is_match: true, kind: "IKEA Malm, 3 drawers", score: /Massive/.test(title) ? 6 : 7,
           why: "Good condition, needs a car to collect", notes: ["80 × 78 × 48 cm"] }
       : { is_match: true, kind: "Women's city bike 28\"", score: /26 er Damenrad/.test(title) ? 4 : 7,
@@ -189,7 +218,7 @@ const drain = async (E, st, max = 40) => {
   }
   return out;
 };
-const reset = () => { net.tgCalls = []; net.aiTitles = []; net.aiItems = []; net.kaHits = []; };
+const reset = () => { net.tgCalls = []; net.aiTitles = []; net.aiItems = []; net.screens = []; net.kaHits = []; };
 const listings = () => net.kaHits.filter((h) => !h.url.includes("/s-anzeige/"));
 
 // ---------------------------------------------------------------- 1. rules
@@ -263,16 +292,40 @@ await ok("Kommode: changing tables, wardrobe inserts, handles → no; lookalikes
   }
 });
 
+console.log("\n1c. free-stuff rules (no AI)");
+await ok("junk dropped by title: stones, clothes, plants, sofas, kitchens, kids', bike gear", () => {
+  for (const t of ["12t Granit-Stein zu verschenken", "Nike Jogginganzug zu verschenken", "2 Paar Damenstiefel Gr. 40",
+    "Pflanzen zu verschenken", "Robuste Zimmerpflanzen zu verschenken (Pilea u.a.)", "Eckcouch zu verschenke",
+    "Einbauküche gebraucht zu verschenken", "fürs Kinderzimmer", "Katzenspielzeug", "Fahrradschloss",
+    "Split/Schotter 16/32 Selbstabholung", "Bauschutt abzugeben", "Matratze 90x200", "Bild zu verschenken"])
+    assert.ok(B.freeRejectReason(t), t);
+});
+await ok("…but not by an unlucky word ending: Versand, Preis, Massivholz, Schallplatten", () => {
+  for (const t of ["Schreibtisch Massivholz, Versand möglich", "Reiskocher, Preis: geschenkt", "Schallplatten Sammlung Rock"])
+    assert.equal(B.freeRejectReason(t), null, t);
+});
+await ok("wishlist titles skip the screen; free beds, Kommoden, bikes go to their own items", () => {
+  for (const t of ["diverse Teller, Tassen, Kannen", "Monitor 24 Zoll", "kaffeemaschine", "Lampenschirm zu verschenken",
+    "Garderobe zu verschenken", "lebensmittel", "Schreibtisch Massivholz, Versand möglich"])
+    assert.ok(B.namesFree(t), t);
+  for (const t of ["Verschiedenes zum Verschenken", "zum Verschenken", "Schrank zu verschenken"]) assert.ok(!B.namesFree(t), t);
+  assert.equal(B.routeFree("nur noch Doppelbett mit Lattenroste zu verschenken"), "bed");
+  assert.equal(B.routeFree("Massive Kommode zu verschenken"), "kommode");
+  assert.equal(B.routeFree("Damenrad 28 Zoll zu verschenken"), "bike");
+  assert.equal(B.routeFree("Monitor 24 Zoll"), null);
+});
+
 // ---------------------------------------------------------------- 2. flow
 console.log("\n2. searches → rules → AI → posts (bikes ≤ 30 €, bed ≤ 100 €, Kommode ≤ 35 €)");
 {
   const [DB, st, E] = fresh(); reset();
   const t = [];
-  for (let i = 0; i < 5; i++) t.push(await B.findsStep(E, st, tg));
+  for (let i = 0; i < 6; i++) t.push(await B.findsStep(E, st, tg));
   t.forEach((x, i) => console.log(`   tick ${i + 1}: ${x}`));
-  const which = (h) => /art_s:(\w+)/.exec(h.url)?.[1] ?? (h.url.includes("/kommode/") ? "kommode" : "?");
-  await ok("five ticks, one listing each: Damen, Herren, beds, Kommoden, then the 2-hourly Weiteres", () => {
-    assert.deepEqual(listings().map(which), ["damen", "herren", "betten", "kommode", "weiteres"]);
+  const which = (h) => /art_s:(\w+)/.exec(h.url)?.[1] ?? (h.url.includes("/kommode/") ? "kommode"
+    : h.url.includes("/s-zu-verschenken/") ? "free" : "?");
+  await ok("six ticks, one listing each: Damen, Herren, free, beds, Kommoden, then the 2-hourly Weiteres", () => {
+    assert.deepEqual(listings().map(which), ["damen", "herren", "free", "betten", "kommode", "weiteres"]);
   });
   await ok("each search carries its own item's price cap", () => {
     const url = (w) => listings().find((h) => which(h) === w).url;
@@ -282,7 +335,7 @@ console.log("\n2. searches → rules → AI → posts (bikes ≤ 30 €, bed ≤
   });
   const rest = await drain(E, st);
   await ok("then idle ticks only read and rate - no more listing requests", () => {
-    assert.equal(listings().length, 5);
+    assert.equal(listings().length, 6);
     assert.equal(rest.at(-1), "finds: nothing to rate");
   });
   const by = (item) => net.aiTitles.filter((_, i) => net.aiItems[i] === item).sort();
@@ -290,12 +343,20 @@ console.log("\n2. searches → rules → AI → posts (bikes ≤ 30 €, bed ≤
     assert.deepEqual(by("bike"), ["26 er Damenrad", "28 Damenrad", "Flat Bar 780mm - Rose Hobo",
       "Giant Cityrad, 57 cm Rahmen, 3x8 Gangschaltung", "Herrenrad Everest",
       "Live Farbe Schwarz mit Rot schwarzem Schloss", "Vorkriegsfahrrad", "Zwei zerlegbare Fahrräder 28\""]);
-    assert.deepEqual(by("bed"), ["Doppelbett Holz mit Lattenrost", "IKEA Brimnes Bett 140x200 cm mit 4 Schubladen"]);
+    assert.deepEqual(by("bed"), ["Doppelbett Holz mit Lattenrost", "IKEA Brimnes Bett 140x200 cm mit 4 Schubladen",
+      "nur noch Doppelbett mit Lattenroste zu verschenken"]);
+    assert.deepEqual(by("free"), ["Lampenschirm zu verschenken", "Monitor 24 Zoll", "Schallplatten Sammlung Rock",
+      "Verschiedenes zum Verschenken", "diverse Teller, Tassen, Kannen zu verschenken"]);
     assert.deepEqual(by("kommode"), ["IKEA Malm Kommode 3 Schubladen weiß", "Kommode Hemnes/ Nachttisch", "Massive Kommode zu verschenken"]);
   });
-  await ok("posted: 5 bikes 🚲, 2 beds 🛏, 2 Kommoden 🗄 - not what the AI turned down", () => {
+  await ok("free: the 3 vague titles took ONE screening call; 2 passed", () => {
+    assert.equal(net.screens.length, 1);
+    assert.equal(net.screens[0].match(/^id: /gm).length, 3);
+    assert.equal(why(DB, "Klebetapete"), "screen: 1/10 test");
+  });
+  await ok("posted: 5 bikes 🚲, 3 beds 🛏 (one from the free category), 2 Kommoden 🗄, 4 free 🎁", () => {
     const n = (e) => captions().filter((c) => c.startsWith(e)).length;
-    assert.deepEqual([n("🚲"), n("🛏"), n("🗄")], [5, 2, 2]);
+    assert.deepEqual([n("🚲"), n("🛏"), n("🗄"), n("🎁")], [5, 3, 2, 4]);
     assert.equal(why(DB, "Vorkriegsfahrrad"), "ai: pedals and parts only");
     assert.equal(why(DB, "Kommode Hemnes/ Nachttisch"), "ai: small nightstand");
     assert.ok(!captions().some((c) => /Vorkrieg|Flat Bar|Live Farbe|Nachttisch/.test(c)));
@@ -320,12 +381,20 @@ console.log("\n2. searches → rules → AI → posts (bikes ≤ 30 €, bed ≤
   });
   await ok("a bed with no size stated is capped at 5/10 even when the model says more", () =>
     assert.equal(DB.raw.prepare("SELECT score FROM bikes WHERE title='Doppelbett Holz mit Lattenrost'").get().score, 5));
+  await ok("free stuff: says Free, needs 6/10 (the 5/10 lampshade is held back)", () => {
+    const c = captions().find((x) => x.includes("Teller"));
+    console.log("   free sample:\n     " + c.split("\n").join("\n     "));
+    assert.match(c, /^🎁 <b>diverse Teller, Tassen, Kannen zu verschenken<\/b>\n🆓 <b>Free<\/b> · 03229 Luckaitztal · 25 km\n⭐ <b>8\/10<\/b>/);
+    assert.equal(why(DB, "Lampenschirm zu verschenken"), "rated 5/10");
+    assert.equal(why(DB, "12t Granit-Stein zu verschenken"), "not for a student's room (granitstein)");
+    assert.equal(why(DB, "Kaffeemaschine"), "old ad (05.10.2026)");
+  });
   await ok("bed and Kommode alerts look the same, with their own emoji; free shows as free", () => {
-    const bed = captions().find((x) => x.includes("Doppelbett"));
+    const bed = captions().find((x) => x.includes("Doppelbett Holz"));
     const kom = captions().find((x) => x.includes("Massive Kommode"));
     console.log("   bed sample:\n     " + bed.split("\n").join("\n     "));
     assert.match(bed, /^🛏 <b>Doppelbett Holz mit Lattenrost<\/b>\n<b>80 €<\/b>[\s\S]*⭐ <b>5\/10<\/b> · Wooden double bed[\s\S]*• Size not stated - ask/);
-    assert.match(kom, /^🗄 <b>Massive Kommode zu verschenken<\/b>\n🆓 <b>Zu verschenken<\/b> · 03130 Spremberg · 20 km\n⭐ <b>6\/10<\/b>/);
+    assert.match(kom, /^🗄 <b>Massive Kommode zu verschenken<\/b>\n🆓 <b>Free<\/b> · 03130 Spremberg · 20 km\n⭐ <b>6\/10<\/b>/);
   });
 }
 
@@ -365,6 +434,7 @@ console.log("\n3. the ad page, and when the AI fails");
     assert.equal(why(DB, "Flat Bar 780mm - Rose Hobo"), "unsure, and no AI to ask");
     assert.equal(why(DB, "Doppelbett Holz mit Lattenrost"), "unsure, and no AI to ask");
     assert.equal(why(DB, "Kommode Hemnes/ Nachttisch"), "unsure, and no AI to ask");
+    assert.equal(why(DB, "Verschiedenes zum Verschenken"), "unsure, and no AI to ask");
     assert.ok(captions().some((c) => c.startsWith("🛏 <b>IKEA Brimnes")) && captions().some((c) => c.startsWith("🗄 <b>IKEA Malm")));
   });
   net.ai = "ok";
@@ -527,13 +597,15 @@ console.log("\n4b. the WG search's own Kleinanzeigen blocks");
 console.log("\n4c. forum topics");
 {
   const [DB, st, E0] = fresh(); reset();
-  const E = { ...E0, TOPIC_WG: "597", TOPIC_BIKE: "595", TOPIC_KOMMODE: "596", TOPIC_BED: "598" };
-  for (let i = 0; i < 5; i++) await B.findsStep(E, st, tg);
+  const E = { ...E0, TOPIC_WG: "597", TOPIC_BIKE: "595", TOPIC_KOMMODE: "596", TOPIC_BED: "598", TOPIC_FREE: "610" };
+  for (let i = 0; i < 6; i++) await B.findsStep(E, st, tg);
   await drain(E, st);
   const threads = (emoji) => [...new Set(posts().filter((p) => (p.body.caption ?? p.body.text).startsWith(emoji))
     .map((p) => p.body.message_thread_id))];
-  await ok("each item lands in its own topic: 🚲 595, 🛏 598, 🗄 596", () => {
+  await ok("each item lands in its own topic: 🚲 595, 🛏 598, 🗄 596, 🎁 610 - a free bed in 🛏", () => {
     assert.deepEqual(threads("🚲"), [595]); assert.deepEqual(threads("🛏"), [598]); assert.deepEqual(threads("🗄"), [596]);
+    assert.deepEqual(threads("🎁"), [610]);
+    assert.ok(posts().some((p) => /Doppelbett mit Lattenroste/.test(p.body.caption ?? "") && p.body.message_thread_id === 598));
   });
   // the WG search: one listing tick queues rooms, the next drafts and posts one
   const waits = []; const ctx = { waitUntil: (p) => waits.push(p) };
@@ -597,8 +669,10 @@ console.log("\n5. cron dispatch, commands, permissions, health");
     assert.match(t, /🛏 <b>Bed 140×200<\/b>[^\n]*up to <b>100 €<\/b>/);
     assert.match(t, /🗄 <b>Kommode<\/b>[^\n]*up to <b>35 €<\/b>/);
     const rows = c.at(-1).body.reply_markup.inline_keyboard;
-    assert.deepEqual(rows.slice(0, 3).map((r) => r.map((b) => b.text)),
-      [["🚲 −5", "≤ 30 €", "+5", "⏸"], ["🛏 −10", "≤ 100 €", "+10", "⏸"], ["🗄 −5", "≤ 35 €", "+5", "⏸"]]);
+    assert.deepEqual(rows.slice(0, 4).map((r) => r.map((b) => b.text)),
+      [["🚲 −5", "≤ 30 €", "+5", "⏸"], ["🛏 −10", "≤ 100 €", "+10", "⏸"], ["🗄 −5", "≤ 35 €", "+5", "⏸"],
+       ["🎁 −1", "⭐ ≥ 6", "+1", "⏸"]]);
+    assert.match(t, /🎁 <b>Free stuff<\/b>[^\n]*free, rated <b>6\/10<\/b> or better/);
   });
   await btn("bk:price:bed:+10", 555); await btn("bk:price:kommode:-5", 555);
   await ok("buttons: bed +10 €, Kommode −5 €", async () => {
@@ -606,14 +680,19 @@ console.log("\n5. cron dispatch, commands, permissions, health");
   });
   await btn("bk:price:+5", 555);
   await ok("an old bike card's +5 € button still works (bikes)", async () => assert.equal((await set()).bike.max, 35));
+  await btn("bk:price:free:+1", 555);
+  await ok("free stuff's ± moves its rating floor, not a price", async () => {
+    assert.equal((await set()).free.floor, 7); assert.equal((await set()).free.max, 0);
+  });
+  await msg("/finds free 6", 555);
   await msg("/finds bed 80", 555); await msg("/finds kommode 40", 555);
   await ok("/finds bed 80, /finds kommode 40", async () => {
     assert.equal((await set()).bed.max, 80); assert.equal((await set()).kommode.max, 40);
   });
   await msg("/finds kommode off", 555);
   reset(); await st.kvSet("bikes_lock", "0");
-  for (const k of ["damen", "herren", "bed", "kommode", "weiteres"]) await st.kvSet("bikes_checked:" + k, "0");
-  for (let i = 0; i < 5; i++) await B.findsStep(E, st, tg);
+  for (const k of ["damen", "herren", "bed", "kommode", "weiteres", "free"]) await st.kvSet("bikes_checked:" + k, "0");
+  for (let i = 0; i < 6; i++) await B.findsStep(E, st, tg);
   await ok("a paused item isn't searched at all", async () => {
     assert.equal((await set()).kommode.on, false);
     assert.ok(!net.kaHits.some((h) => h.url.includes("/kommode/")));
@@ -635,7 +714,7 @@ console.log("\n5. cron dispatch, commands, permissions, health");
   });
   c = await msg("/status", 1000001);
   await ok("owner /status has the finds line", () =>
-    assert.match(c[0].body.text, /Finds: {11}✅ 🚲 ≤ 25 € · 🛏 ≤ 80 € · 🗄 ≤ 40 €, checked/));
+    assert.match(c[0].body.text, /Finds: {11}✅ 🚲 ≤ 25 € · 🛏 ≤ 80 € · 🗄 ≤ 40 € · 🎁 ⭐ ≥ 6, checked/));
   const health = async (q) => worker.fetch(new Request("https://w/health" + q), E);
   await ok("/health?ai asks OpenAI whether the deployed key works", async () => {
     assert.deepEqual(await (await health("?ai")).json(), { ok: true, openai: "ok" });

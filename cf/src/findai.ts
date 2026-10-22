@@ -3,7 +3,7 @@
 // go and pick it up. Rules in finds.ts already threw out the obvious misses;
 // this catches what a title can't show - and the rating needs the call anyway.
 
-export type ItemKey = "bike" | "bed" | "kommode";
+export type ItemKey = "bike" | "bed" | "kommode" | "free";
 
 export interface Assessment {
   is_match: boolean;
@@ -23,6 +23,10 @@ export interface FoundAd {
 }
 
 interface Spec { what: string; isMatch: string; kinds: string; factors: string; caps: string; notes: string }
+
+// What a free find is worth posting for - also the yardstick of the batch screen.
+const FREE_USEFUL = `small furniture (desk, desk chair, chairs, shelf, small table, nightstand, coat rack, mirror, lamps), bedding and textiles (duvet, pillows, bed linen, blankets, towels, curtains, rugs), kitchenware and small kitchen appliances (pots, pans, plates, cups, glasses, cutlery, kettle, toaster, coffee machine, microwave), household helpers (vacuum cleaner, drying rack, iron, laundry basket, hangers, bins, extension leads, fan, heater), working electronics and devices (laptop, monitor, phone, tablet, headphones, speakers, keyboard, printer, console, TV), books, board games, instruments, sport or camping gear, suitcases, and food that is still good`;
+const FREE_NOT = `clothes and shoes, plants, mattresses, anything big (sofas, couches, wardrobes, wall units, kitchens, fridges, washing machines, ovens), anything for kids, babies or pregnancy, toys, pets and pet supplies, garden or building material (stones, soil, wood, tiles, foil), decorations and collectibles, events, flea markets and house clearances, bikes and bike parts, car parts, medical aids, broken things, and posts searching for something`;
 
 const SPECS: Record<ItemKey, Spec> = {
   bike: {
@@ -56,6 +60,17 @@ const SPECS: Record<ItemKey, Spec> = {
     caps: `condition not described at all -> at most 6. 20 km or more away -> at most 6. A broken drawer or needs repair -> at most 5.`,
     notes: `dimensions, number of drawers, damage, pickup deadlines`,
   },
+  free: {
+    what: "free giveaway",
+    isMatch: `true if the ad gives away, for free, something useful or cool for an international student who just arrived in Germany and is setting up a room in a shared flat (WG): ${FREE_USEFUL}. false for ${FREE_NOT}.`,
+    kinds: `"Desk lamp", "Kitchen set: plates, cups, glasses", "24\" monitor", "Food: pasta, rice, tins"`,
+    factors: `- usefulness for a new student's room weighs most: things you need every day beat nice-to-haves
+- condition: works and is clean vs. worn, incomplete or broken
+- how much you get: a whole set beats a single piece
+- transport: small things go by bus or bike; bulky ones need a car`,
+    caps: `condition not described at all -> at most 7. 20 km or more away -> at most 6 unless it's small and worth the trip. Broken or needs repair -> at most 4.`,
+    notes: `what exactly is included, condition, size or weight for carrying, pickup deadlines`,
+  },
 };
 
 const system = (s: Spec) => `You rate second-hand ${s.what} listings from Kleinanzeigen around Cottbus, Germany, for a group chat of people looking for cheap or free things. Read the listing and return JSON only:
@@ -75,6 +90,40 @@ Caps: ${s.caps} Be strict; most listings land between 4 and 7.
 why: one short line, under 90 characters, saying what drives the score up and what pulls it down, so a reader sees at a glance why it isn't higher or lower. Name the real factors, e.g. "Looks well kept and cheap, only docked for the 26 km pickup" or "Free, but a drawer is broken". If distance cost points, say so here.
 
 notes: 0-3 short considerations a buyer should know, each under 60 characters, in English: ${s.notes}. Only what the listing says or clearly implies - never invent. Never restate the price, place or distance - they are shown already. Empty list if nothing notable.`;
+
+export interface Screen { score: number; reason: string }
+
+/**
+ * Free ads with vague titles ("zu verschenken", "Verschiedenes") in one cheap
+ * call: title and preview text only, a 0-10 per ad. Only the ones that pass
+ * get their page read and a full rating - so the many duds cost a share of
+ * one call instead of one call each.
+ */
+export async function screenFree(
+  apiKey: string, model: string, ads: { id: string; title: string; snippet: string }[],
+): Promise<Map<string, Screen>> {
+  const sys = `You screen free giveaway ads from Kleinanzeigen for an international student who just arrived in Germany and is setting up a room in a shared flat (WG). From each ad's title and preview text, rate 0-10 how likely it gives away something useful or cool for that: ${FREE_USEFUL}. Score 0-1 for ${FREE_NOT}. A vague ad ("Verschiedenes zu verschenken") that may hide useful household things scores 5. Return JSON only: {"ads": [{"id": string, "score": integer, "reason": string (max 6 words)}]}`;
+  const user = ads.map((a) => `id: ${a.id}\ntitle: ${a.title}\npreview: ${a.snippet.slice(0, 220).replace(/\s+/g, " ")}`).join("\n\n");
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      response_format: { type: "json_object" },
+      messages: [{ role: "system", content: sys }, { role: "user", content: user }],
+    }),
+  });
+  if (!r.ok) throw new Error(`OpenAI ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const data = (await r.json()) as any;
+  const d = JSON.parse(data?.choices?.[0]?.message?.content ?? "{}");
+  const out = new Map<string, Screen>();
+  for (const a of Array.isArray(d.ads) ? d.ads : []) {
+    const score = Math.round(Number(a?.score));
+    if (a?.id && Number.isFinite(score))
+      out.set(String(a.id), { score: Math.min(10, Math.max(0, score)), reason: String(a.reason ?? "").slice(0, 60) });
+  }
+  return out;
+}
 
 export async function assessItem(
   apiKey: string, model: string, item: ItemKey, ad: FoundAd,

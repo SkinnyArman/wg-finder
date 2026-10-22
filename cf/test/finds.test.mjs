@@ -18,7 +18,8 @@ const card = ([id, title, price, place, km, date]) =>
   `<div><svg></svg><span>${place}</span><span class="k">(${km} km)</span></div>` +
   `<div><svg></svg><span>${date}</span></div>` +
   `<h3><a class="t" href="/s-anzeige/${slug(title)}/${id}-217-7743">${title}</a></h3>` +
-  `<p class="mb-xsmall">Beschreibung</p><p class="text-title3 font-bold">${price}</p></article>`;
+  // the free category's cards carry no price at all
+  `<p class="mb-xsmall">Beschreibung</p>${price === null ? "" : `<p class="text-title3 font-bold">${price}</p>`}</article>`;
 const page = (cards) => `<html><h1>Ergebnisse</h1>${cards.map(card).join("")}</html>`;
 
 // [id, title, price, place, km, posted] - newest first, like Kleinanzeigen
@@ -71,19 +72,19 @@ const KOMMODEN = page([
   [507, "Kommode weiß", "30 €", "03044 Cottbus", 2, "05.10.2026"],
 ]);
 const FREE = page([
-  [601, "Verschiedenes zum Verschenken", "Zu verschenken", "03050 Cottbus", 3, "Heute, 12:33"],        // vague → screen
-  [602, "Lampenschirm zu verschenken", "Zu verschenken", "03046 Cottbus", 1, "Heute, 06:58"],          // rated 5: held back
-  [603, "diverse Teller, Tassen, Kannen zu verschenken", "Zu verschenken", "03229 Luckaitztal", 25, "Heute, 01:09"],
-  [604, "12t Granit-Stein zu verschenken", "Zu verschenken", "03130 Spremberg", 20, "Gestern, 16:51"],
-  [605, "Nike Jogginganzug zu verschenken", "Zu verschenken", "03046 Cottbus", 1, "Heute, 06:53"],
-  [606, "nur noch Doppelbett mit Lattenroste zu verschenken", "Zu verschenken", "03042 Cottbus", 6, "Gestern, 18:00"],
-  [607, "Monitor 24 Zoll", "Zu verschenken", "03046 Cottbus", 1, "Heute, 05:00"],
-  [608, "Klebetapete", "Zu verschenken", "03046 Cottbus", 1, "Gestern, 18:30"],                         // vague → screened out
-  [609, "Pflanzen zu verschenken", "Zu verschenken", "03226 Vetschau", 19, "Heute, 06:45"],
-  [610, "Einbauküche gebraucht zu verschenken", "Zu verschenken", "02979 Elsterheide", 30, "Gestern, 10:57"],
-  [611, "Fahrradschloss", "Zu verschenken", "03046 Cottbus", 1, "Gestern, 09:00"],
-  [612, "Schallplatten Sammlung Rock", "Zu verschenken", "03048 Cottbus", 3, "Gestern, 08:00"],          // vague → passes
-  [613, "Kaffeemaschine", "Zu verschenken", "03048 Cottbus", 3, "05.10.2026"],
+  [601, "Verschiedenes zum Verschenken", null, "03050 Cottbus", 3, "Heute, 12:33"],        // vague → screen
+  [602, "Lampenschirm zu verschenken", null, "03046 Cottbus", 1, "Heute, 06:58"],          // rated 5: held back
+  [603, "diverse Teller, Tassen, Kannen zu verschenken", null, "03229 Luckaitztal", 25, "Heute, 01:09"],
+  [604, "12t Granit-Stein zu verschenken", null, "03130 Spremberg", 20, "Gestern, 16:51"],
+  [605, "Nike Jogginganzug zu verschenken", null, "03046 Cottbus", 1, "Heute, 06:53"],
+  [606, "nur noch Doppelbett mit Lattenroste zu verschenken", null, "03042 Cottbus", 6, "Gestern, 18:00"],
+  [607, "Monitor 24 Zoll", null, "03046 Cottbus", 1, "Heute, 05:00"],
+  [608, "Klebetapete", null, "03046 Cottbus", 1, "Gestern, 18:30"],                         // vague → screened out
+  [609, "Pflanzen zu verschenken", null, "03226 Vetschau", 19, "Heute, 06:45"],
+  [610, "Einbauküche gebraucht zu verschenken", null, "02979 Elsterheide", 30, "Gestern, 10:57"],
+  [611, "Fahrradschloss", null, "03046 Cottbus", 1, "Gestern, 09:00"],
+  [612, "Schallplatten Sammlung Rock", null, "03048 Cottbus", 3, "Gestern, 08:00"],          // vague → passes
+  [613, "Kaffeemaschine", null, "03048 Cottbus", 3, "05.10.2026"],
 ]);
 const PAGES = { damen: DAMEN, herren: HERREN, weiteres: WEITERES, betten: BETTEN };
 // the seller's category on each ad page; Kommoden come from a keyword search: none
@@ -606,6 +607,9 @@ console.log("\n4c. forum topics");
     assert.deepEqual(threads("🚲"), [595]); assert.deepEqual(threads("🛏"), [598]); assert.deepEqual(threads("🗄"), [596]);
     assert.deepEqual(threads("🎁"), [610]);
     assert.ok(posts().some((p) => /Doppelbett mit Lattenroste/.test(p.body.caption ?? "") && p.body.message_thread_id === 598));
+    // a price-less card from the free category says Free, in whichever topic it lands
+    assert.match(captions().find((c) => c.includes("Doppelbett mit Lattenroste")), /\n🆓 <b>Free<\/b> · /);
+    assert.ok(!captions().some((c) => c.includes("price?")));
   });
   // the WG search: one listing tick queues rooms, the next drafts and posts one
   const waits = []; const ctx = { waitUntil: (p) => waits.push(p) };

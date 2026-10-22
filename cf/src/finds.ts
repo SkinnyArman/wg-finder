@@ -579,9 +579,11 @@ async function checkListing(
   // The page is newest first; store oldest first so rowid order is the
   // order they were posted in, and alerts go out in that order too.
   let fresh = 0, maybe = 0;
-  for (const ad of [...ads].reverse()) {
-    if (known.has(ad.ad_id)) continue;
+  for (const raw of [...ads].reverse()) {
+    if (known.has(raw.ad_id)) continue;
     fresh++;
+    // cards in the free category show no price at all - everything there is free
+    const ad = !raw.rent && search.id === "free" ? { ...raw, rent: "Zu verschenken" } : raw;
     const price = priceEur(ad.rent);
     const km = distanceKm(ad.district);
     // a free ad that's really a bed, Kommode or bike joins that item

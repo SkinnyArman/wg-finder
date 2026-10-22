@@ -14,11 +14,12 @@ import {
   type Profile, type Settings, type Source,
 } from "./settings.ts";
 import { compose } from "./writer.ts";
-import { Telegram, esc, type Button } from "./telegram.ts";
+import { Telegram, esc, inTopic, type Button } from "./telegram.ts";
+import { aiFailed, aiWorked, checkKey } from "./aikey.ts";
 import {
-  BIKES_CRON, bikeStep, bikesKeyboard, bikesLine, bikesStatus, loadBikeSettings,
-  setBikeSetting, setBikes,
-} from "./bikes.ts";
+  FINDS_CRON, findsKeyboard, findsLine, findsStatus, findsStep, loadFindSettings,
+  parseItem, setFindSetting, setItemOn, ITEMS, type ItemKey,
+} from "./finds.ts";
 
 export interface Env {
   DB: D1Database;
@@ -28,8 +29,17 @@ export interface Env {
   TELEGRAM_CHAT_ID: string;
   TELEGRAM_OWNER_ID: string;
   WEBHOOK_SECRET: string;
-  BIKES_MODEL?: string;
+  FINDS_MODEL?: string;
+  // the group's forum topics (wrangler.toml); unset: everything in General
+  TOPIC_WG?: string;
+  TOPIC_BIKE?: string;
+  TOPIC_BED?: string;
+  TOPIC_KOMMODE?: string;
 }
+
+const wgTopic = (env: Env) => inTopic(Number(env.TOPIC_WG) || null);
+/** Answer in the topic the command or button came from. */
+const sameTopic = (msg: any) => inTopic(msg?.is_topic_message ? msg.message_thread_id : null);
 
 // The profile is ~4.5KB of JSON - too big for a Worker secret (5.1KB limit,
 // and base64 inflates it). It lives in D1 instead, seeded by make-profile.sh.
@@ -114,7 +124,7 @@ async function step(env: Env, tg: Telegram, force = false): Promise<string> {
           `${outageHours(o)} hours</b>\n\n` +
           `It keeps retrying by itself, waiting longer each time (next try in ` +
           `${mins} min). Nothing is lost, and ${other} isn't affected. ` +
-          `Nothing to do unless this goes on for days.\n\nDetails: /status`);
+          `Nothing to do unless this goes on for days.\n\nDetails: /status`, wgTopic(env));
       }
       return `${SITE[e.source]} blocked, retry in ${mins} min`;
     }
@@ -207,14 +217,16 @@ async function draftOne(
     });
   } catch (e) {
     await store.noteFailure(row.ad_id);
+    await aiFailed(store, tg, e);
     throw e;
   }
+  await aiWorked(store);
 
   // Deliver FIRST, then mark it done. Marking first meant a failed send
   // looked like a success: the ad showed as 'pending' with a pushed_at
   // timestamp while nothing ever reached Telegram.
   try {
-    await push(tg, ready, draft.language, draft.facts_used, draft.thin_ad, draft.message);
+    await push(tg, ready, draft.language, draft.facts_used, draft.thin_ad, draft.message, wgTopic(env));
   } catch (e: any) {
     // keep the draft so we don't pay OpenAI twice, but leave it queued
     await store.keepDraft(row.ad_id, draft.language, text, draft.message);
@@ -270,7 +282,7 @@ export async function statusReport(env: Env, store: Store, profile: Profile): Pr
     `Last ad sent:    ${ago}`,
     `Searches:        ${(profile.searches ?? []).length}`,
     ...(stats.pending ? [`Waiting on you:  ${stats.pending}  → /review`] : []),
-    await bikesLine(store),
+    await findsLine(store),
     "",
     `Seen so far: ${seen}`,
   ].join("\n");
@@ -339,15 +351,16 @@ const adKeyboard = (id: string): Button[][] => [[
 
 async function push(
   tg: Telegram, row: AdRow, lang: string, used: string[], thin: boolean, message: string,
+  topic: Record<string, unknown> = {},
 ) {
   const head = header(row, lang, used, thin);
   if (row.image) {
-    try { await tg.sendPhoto(row.image, head); }
-    catch { await tg.send(head); }
+    try { await tg.sendPhoto(row.image, head, undefined, topic); }
+    catch { await tg.send(head, topic); }
   } else {
-    await tg.send(head);
+    await tg.send(head, topic);
   }
-  await tg.send(`<pre>${esc(message)}</pre>`, tg.keyboard(adKeyboard(row.ad_id)));
+  await tg.send(`<pre>${esc(message)}</pre>`, { ...tg.keyboard(adKeyboard(row.ad_id)), ...topic });
 }
 
 // ------------------------------------------------------------- webhook
@@ -399,25 +412,26 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
   const owner = String(env.TELEGRAM_OWNER_ID || env.TELEGRAM_CHAT_ID);
   const isOwner = !!from && String(from.id) === owner;
 
-  // Bike alerts belong to the whole group: anyone in it may run /bikes and
-  // press its buttons. Everything else stays the owner's.
+  // The finds (bikes, bed, Kommode) belong to the whole group: anyone in it
+  // may run /finds (or /bikes) and press its buttons.
+  // Everything else stays the owner's.
   const chatId = String(update.message?.chat?.id ?? update.callback_query?.message?.chat?.id ?? "");
   const inGroup = chatId === String(env.TELEGRAM_CHAT_ID);
-  const bikeCmd = /^\/bikes(@\w+)?(\s|$)/i.test(text.trim());
+  const bikeCmd = /^\/(bikes|finds)(@\w+)?(\s|$)/i.test(text.trim());
   const bikeBtn = String(update.callback_query?.data ?? "").startsWith("bk:");
   if ((bikeCmd || bikeBtn) && (isOwner || inGroup))
-    return handleBikes(update, env, tg, store);
+    return handleFinds(update, env, tg, store);
 
   const profile = await profileOf(env);
   const name = (profile.about as any)?.name ?? "its owner";
   if (!isOwner) {
     const deny = `Sorry, this bot was built for ${name}'s own flat search and only answers to them.` +
-      (inGroup ? " Bike alerts are open to everyone here: /bikes" : "");
+      (inGroup ? " The bike and furniture alerts are open to everyone here: /finds" : "");
     if (update.callback_query) {
       await tg.answerCallback(update.callback_query.id, deny, true);
     } else {
       // someone else typed a command at it - say so once, in that chat
-      await tg.send(deny, {}, String(update.message.chat.id));
+      await tg.send(deny, sameTopic(update.message), String(update.message.chat.id));
     }
     return;
   }
@@ -427,7 +441,8 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
   const chat = String(update.message.chat.id);
   const [cmdRaw, ...args] = text.trim().split(/\s+/);
   const cmd = cmdRaw.split("@")[0];
-  const reply = (t: string, o: Record<string, unknown> = {}) => tg.send(t, o, chat);
+  const reply = (t: string, o: Record<string, unknown> = {}) =>
+    tg.send(t, { ...sameTopic(update.message), ...o }, chat);
 
   switch (cmd) {
     case "/start":
@@ -440,7 +455,7 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
         `/pause [2h] — stop it\n` +
         `/scan — check now\n/more [n] — send more now\n` +
         `/filters — which ads qualify\n/settings — timing\n/stats — totals\n` +
-        `/bikes — free & cheap bike alerts`);
+        `/finds — bikes, bed & Kommode alerts`);
       return;
     }
 
@@ -465,7 +480,7 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
         `/pause [2h] — stop it\n/scan — check now\n/more [n] — send more now\n` +
         `/filters — which ads qualify\n/settings — timing\n` +
         `/stats — totals\n/retry — re-draft failed\n` +
-        `/bikes — free & cheap bike alerts (anyone in the group)`);
+        `/finds — bikes, bed & Kommode alerts (anyone in the group)`);
       return;
 
     case "/stats": {
@@ -551,55 +566,65 @@ async function handleUpdate(update: any, env: Env, tg: Telegram): Promise<void> 
   }
 }
 
-/** /bikes and its buttons - for anyone in the group. */
-async function handleBikes(update: any, env: Env, tg: Telegram, store: Store): Promise<void> {
+/**
+ * /finds (and the older /bikes) and the card's buttons - for anyone in the
+ * group. /finds bed 80 · /finds kommode off · /finds min 5 · /finds now;
+ * /bikes keeps its old meaning: /bikes price 30, /bikes off.
+ */
+async function handleFinds(update: any, env: Env, tg: Telegram, store: Store): Promise<void> {
+  const card = async () => [await findsStatus(env.DB, store), findsKeyboard(await loadFindSettings(store))] as const;
+  const checkNow = async () => (await findsStep(env, store, tg, true)).replace(/^finds: /, "Checked: ");
+
   const cq = update.callback_query;
   if (cq) {
-    const [, act, delta] = String(cq.data).split(":");
-    const s = await loadBikeSettings(store);
+    // bk:price:<item>:<±n> · bk:on|off:<item> · bk:min:<±n> · bk:now
+    // (cards posted before beds existed say bk:price:<±n>, bk:on - bikes)
+    const [, act, a, b] = String(cq.data).split(":");
+    const s = await loadFindSettings(store);
+    const item: ItemKey = (parseItem(a ?? "") ?? "bike");
     let toast = "";
-    if (act === "price") toast = await setBikeSetting(store, "max_price", s.max_price + Number(delta));
-    else if (act === "min") toast = await setBikeSetting(store, "min_score", s.min_score + Number(delta));
-    else if (act === "on" || act === "off") {
-      await setBikes(store, act === "on");
-      toast = act === "on" ? "Bike alerts on" : "Bike alerts paused";
-    } else if (act === "now") {
-      const r = await bikeStep(env, store, tg, true);
-      toast = r.replace(/^bikes: /, "Checked: ");
-    }
+    if (act === "price") {
+      const delta = Number(b ?? a);
+      toast = await setFindSetting(store, item, s.items[item].max + delta);
+    } else if (act === "min") toast = await setFindSetting(store, "min", s.min_score + Number(a));
+    else if (act === "on" || act === "off") toast = await setItemOn(store, item, act === "on");
+    else if (act === "now") toast = await checkNow();
     await tg.answerCallback(cq.id, toast);
     try {
-      await tg.editText(cq.message.chat.id, cq.message.message_id,
-        await bikesStatus(env.DB, store), bikesKeyboard(await loadBikeSettings(store)));
+      const [text, kb] = await card();
+      await tg.editText(cq.message.chat.id, cq.message.message_id, text, kb);
     } catch { /* unchanged */ }
     return;
   }
 
   const chat = String(update.message.chat.id);
-  const reply = (t: string, o: Record<string, unknown> = {}) => tg.send(t, o, chat);
-  const [, sub = "", val] = update.message.text.trim().split(/\s+/);
-  switch (sub.toLowerCase()) {
-    case "": break;
-    case "on": case "off":
-      await setBikes(store, sub.toLowerCase() === "on");
-      break;
-    case "now":
-      await reply((await bikeStep(env, store, tg, true)).replace(/^bikes: /, "Checked: "));
-      break;
-    case "price": case "min": {
-      const n = Number(val);
-      if (!val || !Number.isFinite(n)) {
-        await reply(sub === "price" ? "Try /bikes price 30" : "Try /bikes min 5 (0 = post every bike)");
-        return;
-      }
-      await reply(await setBikeSetting(store, sub === "price" ? "max_price" : "min_score", n));
-      break;
-    }
-    default:
-      await reply("Try /bikes, /bikes price 30, /bikes min 5, /bikes on, /bikes off, /bikes now");
-      return;
-  }
-  await reply(await bikesStatus(env.DB, store), tg.keyboard(bikesKeyboard(await loadBikeSettings(store))));
+  const reply = (t: string, o: Record<string, unknown> = {}) =>
+    tg.send(t, { ...sameTopic(update.message), ...o }, chat);
+  const [cmdRaw, sub = "", val = ""] = update.message.text.trim().split(/\s+/);
+  const isBikes = /^\/bikes/i.test(cmdRaw);
+  const usage = "Try /finds, /finds bed 80, /finds kommode 40, /finds bike off, /finds min 5, /finds now";
+  const lsub = sub.toLowerCase();
+  const item = parseItem(lsub);
+
+  if (lsub === "now") await reply(await checkNow());
+  else if (lsub === "min") {
+    if (!Number.isFinite(Number(val)) || !val) return void (await reply("Try /finds min 5 (0 = post everything)"));
+    await reply(await setFindSetting(store, "min", Number(val)));
+  } else if (lsub === "on" || lsub === "off") {
+    // /bikes off → bikes only; /finds off → everything
+    for (const i of isBikes ? ["bike" as ItemKey] : ITEMS.map((x) => x.key))
+      await setItemOn(store, i, lsub === "on");
+  } else if (lsub === "price" && isBikes) {
+    if (!Number.isFinite(Number(val)) || !val) return void (await reply("Try /bikes price 30"));
+    await reply(await setFindSetting(store, "bike", Number(val)));
+  } else if (item) {
+    if (val === "on" || val === "off") await reply(await setItemOn(store, item, val === "on"));
+    else if (val && Number.isFinite(Number(val))) await reply(await setFindSetting(store, item, Number(val)));
+    else if (val) return void (await reply(usage));
+  } else if (lsub) return void (await reply(usage));
+
+  const [text, kb] = await card();
+  await reply(text, tg.keyboard(kb));
 }
 
 async function handleButton(
@@ -662,7 +687,8 @@ async function handleButton(
       // Keep the approved draft right here to copy; the next ad gets its own card.
       await tg.editText(chat, msgId, adBlock(row) + "\n\n<b>Approved ✅</b>", []);
       if (next)
-        await tg.send(await reviewCard(store, next), tg.keyboard(reviewKeyboard(next.ad_id)), String(chat));
+        await tg.send(await reviewCard(store, next),
+          { ...tg.keyboard(reviewKeyboard(next.ad_id)), ...sameTopic(cq.message) }, String(chat));
       return;
     }
     // Skip / Later: turn this same message into the next ad - nothing new posted.
@@ -712,7 +738,7 @@ async function handleButton(
       "The previous draft was rejected. Take a noticeably different angle, " +
       "open with a different detail, and vary the rhythm.");
     await store.saveDraft(adId, draft.language, row.ad_text ?? "", draft.message);
-    await push(tg, row, draft.language, draft.facts_used, draft.thin_ad, draft.message);
+    await push(tg, row, draft.language, draft.facts_used, draft.thin_ad, draft.message, wgTopic(env));
   }
 }
 
@@ -720,14 +746,14 @@ async function handleButton(
 export default {
   async scheduled(c: ScheduledController, env: Env, ctx: ExecutionContext) {
     const tg = new Telegram(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID);
-    // Two independent jobs on two triggers: a bike-search failure can't
+    // Two independent jobs on two triggers: a failure in the finds can't
     // touch the WG step, and neither shares the other's CPU budget. The WG
-    // trigger only ever fires on even minutes, the bike one on odd minutes -
+    // trigger only ever fires on even minutes, the finds one on odd minutes -
     // dispatching on that, not just the exact cron text, keeps working while
     // a changed trigger is still rolling out (that takes Cloudflare minutes).
     const odd = new Date(c.scheduledTime).getUTCMinutes() % 2 === 1;
-    const job = c.cron === BIKES_CRON || odd
-      ? bikeStep(env, new Store(env.DB), tg)
+    const job = c.cron === FINDS_CRON || odd
+      ? findsStep(env, new Store(env.DB), tg)
       : step(env, tg);
     ctx.waitUntil(job.then(
       (r) => console.log("step:", r),
@@ -736,7 +762,12 @@ export default {
 
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-    if (url.pathname === "/health") return new Response("ok");
+    if (url.pathname === "/health") {
+      // /health?ai also asks OpenAI whether the deployed key works
+      if (!url.searchParams.has("ai")) return new Response("ok");
+      const ai = await checkKey(env.OPENAI_API_KEY, env.FINDS_MODEL || "gpt-5.6-luna");
+      return Response.json({ ok: true, openai: ai });
+    }
     if (req.method !== "POST") return new Response("wg-finder", { status: 200 });
 
     // Telegram signs every webhook call with the secret we registered.

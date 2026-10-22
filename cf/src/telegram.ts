@@ -8,7 +8,7 @@ export class Telegram {
     this.chatId = chatId;
   }
 
-  private async call(method: string, payload: Record<string, unknown>) {
+  private async call(method: string, payload: Record<string, unknown>): Promise<any> {
     const r = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -16,6 +16,11 @@ export class Telegram {
     });
     if (!r.ok) {
       const body = (await r.text()).slice(0, 200);
+      // A topic that was deleted (or a wrong id): post in General rather than lose it.
+      if (payload.message_thread_id && /thread not found/i.test(body)) {
+        const { message_thread_id: _, ...rest } = payload;
+        return this.call(method, rest);
+      }
       throw new Error(`Telegram ${method} ${r.status}: ${body}`);
     }
     return r.json();
@@ -31,9 +36,9 @@ export class Telegram {
     });
   }
 
-  sendPhoto(photo: string, caption: string, chatId?: string) {
+  sendPhoto(photo: string, caption: string, chatId?: string, opts: Record<string, unknown> = {}) {
     return this.call("sendPhoto", {
-      chat_id: chatId ?? this.chatId, photo, caption, parse_mode: "HTML",
+      chat_id: chatId ?? this.chatId, photo, caption, parse_mode: "HTML", ...opts,
     });
   }
 
@@ -62,6 +67,10 @@ export class Telegram {
     });
   }
 }
+
+/** Post into a forum topic; nothing when there is none (plain groups, General). */
+export const inTopic = (thread?: number | null): Record<string, unknown> =>
+  thread ? { message_thread_id: thread } : {};
 
 export function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
